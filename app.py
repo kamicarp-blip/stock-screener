@@ -5,6 +5,7 @@ from modules.theme_search import (
     resolve_themes, get_theme_stocks_by_name, suggest_themes, get_all_theme_stocks,
 )
 from modules.financial_data import get_financial_data, apply_filters, score_stock
+from modules.price_signal import buy_timing
 from modules.news_fetcher import get_stock_news
 
 st.set_page_config(
@@ -210,6 +211,8 @@ with st.sidebar:
     st.divider()
     all_limit = st.slider("全テーマ検索の最大銘柄数", 30, 300, 100, 10,
                           help="テーマ未入力のとき、横断する銘柄数の上限（多いほど時間がかかる）")
+    show_signal = st.checkbox("🟢 買い時シグナルを計算（やや遅い）", value=False,
+                              help="前日終値までの値動きから買い時を判定（移動平均線・RSI）")
     show_news = st.checkbox("ニュースを表示", value=True)
     run_btn = st.button("🔍 スクリーニング実行", type="primary", use_container_width=True)
 
@@ -331,6 +334,15 @@ df["score"] = [s["score"] for s in _scores]
 df["stars"] = [s["stars"] for s in _scores]
 df = df.sort_values("score", ascending=False).reset_index(drop=True)
 
+# 任意：買い時シグナル
+if show_signal:
+    with st.spinner("買い時シグナルを計算中..."):
+        labels = []
+        for _, r in df.iterrows():
+            bt = buy_timing(r["code"])
+            labels.append(bt["label"] if bt else "－")
+        df["buy_label"] = labels
+
 st.success(f"✅ **{len(df)} 社** が条件に一致しました（{len(raw_stocks)} 社中）／総合スコアの高い順")
 
 # 凡例
@@ -369,7 +381,7 @@ with st.expander("🎨 色分けの見方（クリックで開く）", expanded=
 # ──────────────────────────────────────────
 # 結果テーブル（指標を色分け表示）
 # ──────────────────────────────────────────
-cols = ["score", "stars", "code", "name", "current_price", "per", "pbr", "psr",
+cols = ["score", "stars", "buy_label", "code", "name", "current_price", "per", "pbr", "psr",
         "equity_ratio", "market_cap_oku", "net_cash_oku", "revenue_growth",
         "earnings_growth", "operating_margin", "sector"]
 display_df = df[[c for c in cols if c in df.columns]].copy()
@@ -409,6 +421,7 @@ st.dataframe(
     column_config={
         "score": st.column_config.NumberColumn("総合スコア", format="%d 点", width=90),
         "stars": st.column_config.TextColumn("評価", width=110),
+        "buy_label": st.column_config.TextColumn("買い時", width=90),
         "code": st.column_config.TextColumn("コード", width=80),
         "name": st.column_config.TextColumn("銘柄名"),
         "current_price": st.column_config.NumberColumn("株価（円）", format="%.0f"),

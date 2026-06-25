@@ -170,6 +170,28 @@ def suggest_themes(limit: int = 15) -> list[str]:
     return pool[:limit]
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_trending_themes(limit: int = 8) -> list[str]:
+    """株探アクセスランキング順（人気順）でテーマ名を返す ＝『今注目のテーマ』"""
+    try:
+        r = requests.get(
+            "https://kabutan.jp/info/accessranking/3_2", headers=HEADERS, timeout=15
+        )
+        r.encoding = "utf-8"
+        names = [
+            urllib.parse.unquote(t)
+            for t in re.findall(r'/themes/\?theme=([^"&\']+)', r.text)
+        ]
+        seen, out = set(), []
+        for n in names:
+            if n not in seen:
+                seen.add(n)
+                out.append(n)
+        return out[:limit]
+    except Exception:
+        return CURATED_THEMES[:limit]
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_all_theme_stocks(limit: int = 150) -> list[dict]:
     """全テーマ（人気＋主要）を横断して銘柄を集約。コード重複は除外、最大 limit 件"""
