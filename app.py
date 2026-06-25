@@ -40,6 +40,16 @@ with st.sidebar:
     mc_on = st.checkbox("時価総額", value=True)
     mc_min = st.number_input("時価総額 下限（億円）", 0, 100000, 50, disabled=not mc_on)
 
+    rg_on = st.checkbox("増収率（売上成長）", value=False)
+    rg_min = st.number_input("増収率 下限（%）", -100, 1000, 5, disabled=not rg_on)
+
+    eg_on = st.checkbox("増益率（利益成長）", value=False)
+    eg_min = st.number_input("増益率 下限（%）", -100, 1000, 5, disabled=not eg_on)
+
+    om_on = st.checkbox("営業利益率", value=False)
+    om_min = st.number_input("営業利益率 下限（%）", 0, 100, 10, disabled=not om_on,
+                             help="10%以上が成長企業の目安")
+
     st.divider()
     show_news = st.checkbox("ニュースを表示", value=True)
     run_btn = st.button("🔍 スクリーニング実行", type="primary", use_container_width=True)
@@ -122,6 +132,9 @@ df = apply_filters(
     pbr_max=pbr_max if pbr_on else None,
     equity_ratio_min=eq_min if eq_on else None,
     market_cap_min_oku=mc_min if mc_on else None,
+    revenue_growth_min=rg_min if rg_on else None,
+    earnings_growth_min=eg_min if eg_on else None,
+    operating_margin_min=om_min if om_on else None,
 )
 
 st.divider()
@@ -135,7 +148,9 @@ st.success(f"✅ **{len(df)} 社** が条件に一致しました（{len(raw_sto
 # ──────────────────────────────────────────
 # 結果テーブル
 # ──────────────────────────────────────────
-display_df = df[["code", "name", "current_price", "per", "pbr", "equity_ratio", "market_cap_oku", "sector"]].copy()
+cols = ["code", "name", "current_price", "per", "pbr", "equity_ratio",
+        "market_cap_oku", "revenue_growth", "earnings_growth", "operating_margin", "sector"]
+display_df = df[[c for c in cols if c in df.columns]].copy()
 display_df["株探"] = display_df["code"].map(lambda c: f"https://kabutan.jp/stock/?code={c}")
 
 st.dataframe(
@@ -148,6 +163,9 @@ st.dataframe(
         "pbr": st.column_config.NumberColumn("PBR（倍）", format="%.2f"),
         "equity_ratio": st.column_config.NumberColumn("自己資本比率（%）", format="%.1f"),
         "market_cap_oku": st.column_config.NumberColumn("時価総額（億円）", format="%.0f"),
+        "revenue_growth": st.column_config.NumberColumn("増収率（%）", format="%.1f"),
+        "earnings_growth": st.column_config.NumberColumn("増益率（%）", format="%.1f"),
+        "operating_margin": st.column_config.NumberColumn("営業利益率（%）", format="%.1f"),
         "sector": st.column_config.TextColumn("セクター"),
         "株探": st.column_config.LinkColumn("株探リンク"),
     },

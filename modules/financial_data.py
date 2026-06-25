@@ -15,6 +15,10 @@ def get_financial_data(code: str) -> dict | None:
         equity_ratio = _calc_equity_ratio(ticker)
         market_cap = info.get("marketCap") or 0
 
+        rev_growth = info.get("revenueGrowth")
+        earn_growth = info.get("earningsGrowth")
+        op_margins = info.get("operatingMargins")
+
         return {
             "code": code,
             "name": info.get("longName") or info.get("shortName", ""),
@@ -24,6 +28,9 @@ def get_financial_data(code: str) -> dict | None:
             "equity_ratio": equity_ratio,
             "market_cap_oku": round(market_cap / 1e8, 1) if market_cap else None,
             "sector": info.get("sector", ""),
+            "revenue_growth": round(rev_growth * 100, 1) if rev_growth is not None else None,
+            "earnings_growth": round(earn_growth * 100, 1) if earn_growth is not None else None,
+            "operating_margin": round(op_margins * 100, 1) if op_margins is not None else None,
         }
     except Exception:
         return None
@@ -69,6 +76,9 @@ def apply_filters(
     pbr_max: float | None,
     equity_ratio_min: float | None,
     market_cap_min_oku: float | None,
+    revenue_growth_min: float | None,
+    earnings_growth_min: float | None,
+    operating_margin_min: float | None,
 ) -> pd.DataFrame:
     """財務フィルターを適用して DataFrame を返す"""
     filtered = []
@@ -82,6 +92,12 @@ def apply_filters(
         if equity_ratio_min is not None and (s["equity_ratio"] is None or s["equity_ratio"] < equity_ratio_min):
             continue
         if market_cap_min_oku is not None and (s["market_cap_oku"] is None or s["market_cap_oku"] < market_cap_min_oku):
+            continue
+        if revenue_growth_min is not None and (s["revenue_growth"] is None or s["revenue_growth"] < revenue_growth_min):
+            continue
+        if earnings_growth_min is not None and (s["earnings_growth"] is None or s["earnings_growth"] < earnings_growth_min):
+            continue
+        if operating_margin_min is not None and (s["operating_margin"] is None or s["operating_margin"] < operating_margin_min):
             continue
         filtered.append(s)
 
