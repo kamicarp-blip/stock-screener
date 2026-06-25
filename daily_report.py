@@ -17,9 +17,18 @@ from modules.theme_search import (
 from modules.financial_data import get_financial_data, apply_filters, score_stock
 
 # ===== 設定（環境変数で上書き可。空欄なら全テーマ横断）=====
-THEME = os.environ.get("REPORT_THEME", "")
-ALL_LIMIT = int(os.environ.get("REPORT_ALL_LIMIT", "80"))
-TOP_N = int(os.environ.get("REPORT_TOP_N", "10"))
+def _int_env(key, default):
+    """環境変数を整数で取得。未設定や空文字ならデフォルト"""
+    v = os.environ.get(key, "").strip()
+    try:
+        return int(v) if v else default
+    except ValueError:
+        return default
+
+
+THEME = os.environ.get("REPORT_THEME", "").strip()
+ALL_LIMIT = _int_env("REPORT_ALL_LIMIT", 80)
+TOP_N = _int_env("REPORT_TOP_N", 10)
 # 軽い足切り（緩め。スコアで並べ替えるのが主役）
 FILTERS = dict(market_cap_min_oku=30)
 # =========================================================
