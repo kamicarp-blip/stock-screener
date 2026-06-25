@@ -1,4 +1,5 @@
 import time
+import pandas as pd
 import streamlit as st
 from modules.theme_search import (
     resolve_themes, get_theme_stocks_by_name, suggest_themes, get_all_theme_stocks,
@@ -327,8 +328,34 @@ if df.empty:
 
 st.success(f"✅ **{len(df)} 社** が条件に一致しました（{len(raw_stocks)} 社中）")
 
+# 凡例
+with st.expander("🎨 色分けの見方（クリックで開く）", expanded=True):
+    st.markdown(
+        """
+        | 色 | 意味 |
+        |---|---|
+        | 🟢 緑 | **良い**（割安・財務が安全・よく成長している）|
+        | ⬜ 白 | ふつう |
+        | 🔴 赤 | **注意**（割高・財務が弱い・成長していない）|
+
+        **各指標の基準（初心者向けの一般的な目安）**
+
+        | 指標 | 🟢 良い | 🔴 注意 |
+        |---|---|---|
+        | PER（割安度） | 15倍以下 | 25倍超 |
+        | PBR（純資産比） | 1.0倍以下 | 3倍超 |
+        | PSR（売上比） | 1.0倍以下 | 4倍超 |
+        | 自己資本比率 | 50%以上 | 30%未満 |
+        | 営業利益率 | 10%以上 | 5%未満 |
+        | 増収率・増益率 | 10%以上 | マイナス |
+        | ネットキャッシュ | プラス | マイナス |
+
+        ※ あくまで目安です。緑が多いほど「割安で健全な会社」の傾向、という見方をしてください。
+        """
+    )
+
 # ──────────────────────────────────────────
-# 結果テーブル
+# 結果テーブル（指標を色分け表示）
 # ──────────────────────────────────────────
 cols = ["code", "name", "current_price", "per", "pbr", "psr", "equity_ratio",
         "market_cap_oku", "net_cash_oku", "revenue_growth", "earnings_growth",
@@ -336,8 +363,36 @@ cols = ["code", "name", "current_price", "per", "pbr", "psr", "equity_ratio",
 display_df = df[[c for c in cols if c in df.columns]].copy()
 display_df["株探"] = display_df["code"].map(lambda c: f"https://kabutan.jp/stock/?code={c}")
 
+# 色分けの基準（lower=低いほど良い / higher=高いほど良い）
+_GOOD = "background-color:#dcfce7"   # 緑
+_BAD = "background-color:#fee2e2"    # 赤
+_LOWER = {"per": (15, 25), "pbr": (1.0, 3.0), "psr": (1.0, 4.0)}
+_HIGHER = {"equity_ratio": (50, 30), "operating_margin": (10, 5),
+           "revenue_growth": (10, 0), "earnings_growth": (10, 0)}
+
+
+def _cell_color(colname, v):
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return ""
+    if colname in _LOWER:
+        good, bad = _LOWER[colname]
+        return _GOOD if v <= good else (_BAD if v > bad else "")
+    if colname in _HIGHER:
+        good, bad = _HIGHER[colname]
+        return _GOOD if v >= good else (_BAD if v < bad else "")
+    if colname == "net_cash_oku":
+        return _GOOD if v > 0 else (_BAD if v < 0 else "")
+    return ""
+
+
+def _style_column(s):
+    return [_cell_color(s.name, v) for v in s]
+
+
+styler = display_df.style.apply(_style_column, axis=0)
+
 st.dataframe(
-    display_df,
+    styler,
     column_config={
         "code": st.column_config.TextColumn("コード", width=80),
         "name": st.column_config.TextColumn("銘柄名"),
