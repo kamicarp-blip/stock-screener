@@ -4,7 +4,7 @@ import streamlit as st
 from modules.theme_search import (
     resolve_themes, get_theme_stocks_by_name, suggest_themes, get_all_theme_stocks,
 )
-from modules.financial_data import get_financial_data, apply_filters
+from modules.financial_data import get_financial_data, apply_filters, score_stock
 from modules.news_fetcher import get_stock_news
 
 st.set_page_config(
@@ -297,8 +297,7 @@ financial_data = []
 for i, stock in enumerate(raw_stocks):
     data = get_financial_data(stock["code"])
     if data:
-        if not data["name"]:
-            data["name"] = stock["name"]
+        data["name"] = stock["name"]  # 株探の日本語名を優先
         financial_data.append(data)
     progress.progress((i + 1) / len(raw_stocks), text=f"取得中... {i + 1}/{len(raw_stocks)}")
     time.sleep(0.25)
@@ -326,7 +325,13 @@ if df.empty:
     st.warning("条件に合う銘柄が見つかりませんでした。フィルターを緩めてみてください。")
     st.stop()
 
-st.success(f"✅ **{len(df)} 社** が条件に一致しました（{len(raw_stocks)} 社中）")
+# 総合スコアを計算して点数順に並べる
+_scores = [score_stock(r) for _, r in df.iterrows()]
+df["score"] = [s["score"] for s in _scores]
+df["stars"] = [s["stars"] for s in _scores]
+df = df.sort_values("score", ascending=False).reset_index(drop=True)
+
+st.success(f"✅ **{len(df)} 社** が条件に一致しました（{len(raw_stocks)} 社中）／総合スコアの高い順")
 
 # 凡例
 with st.expander("🎨 色分けの見方（クリックで開く）", expanded=True):
@@ -351,15 +356,22 @@ with st.expander("🎨 色分けの見方（クリックで開く）", expanded=
         | ネットキャッシュ | プラス | マイナス |
 
         ※ あくまで目安です。緑が多いほど「割安で健全な会社」の傾向、という見方をしてください。
+
+        ---
+        **総合スコア（0〜100点・⭐）について**
+
+        上の各指標を「割安・財務・成長」の3つにまとめて自動採点し、点数の高い順に並べています。
+        **点数が高い＝割安で財務が健全で成長している、の総合判断**です。まず上位の銘柄から見るのが簡単です。
+        （★5＝80点以上、★4＝65点以上…）
         """
     )
 
 # ──────────────────────────────────────────
 # 結果テーブル（指標を色分け表示）
 # ──────────────────────────────────────────
-cols = ["code", "name", "current_price", "per", "pbr", "psr", "equity_ratio",
-        "market_cap_oku", "net_cash_oku", "revenue_growth", "earnings_growth",
-        "operating_margin", "sector"]
+cols = ["score", "stars", "code", "name", "current_price", "per", "pbr", "psr",
+        "equity_ratio", "market_cap_oku", "net_cash_oku", "revenue_growth",
+        "earnings_growth", "operating_margin", "sector"]
 display_df = df[[c for c in cols if c in df.columns]].copy()
 display_df["株探"] = display_df["code"].map(lambda c: f"https://kabutan.jp/stock/?code={c}")
 
@@ -368,7 +380,8 @@ _GOOD = "background-color:#dcfce7"   # 緑
 _BAD = "background-color:#fee2e2"    # 赤
 _LOWER = {"per": (15, 25), "pbr": (1.0, 3.0), "psr": (1.0, 4.0)}
 _HIGHER = {"equity_ratio": (50, 30), "operating_margin": (10, 5),
-           "revenue_growth": (10, 0), "earnings_growth": (10, 0)}
+           "revenue_growth": (10, 0), "earnings_growth": (10, 0),
+           "score": (65, 40)}
 
 
 def _cell_color(colname, v):
@@ -394,6 +407,8 @@ styler = display_df.style.apply(_style_column, axis=0)
 st.dataframe(
     styler,
     column_config={
+        "score": st.column_config.NumberColumn("総合スコア", format="%d 点", width=90),
+        "stars": st.column_config.TextColumn("評価", width=110),
         "code": st.column_config.TextColumn("コード", width=80),
         "name": st.column_config.TextColumn("銘柄名"),
         "current_price": st.column_config.NumberColumn("株価（円）", format="%.0f"),

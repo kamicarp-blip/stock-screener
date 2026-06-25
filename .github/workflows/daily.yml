@@ -1,0 +1,29 @@
+name: daily-stock-report
+
+on:
+  schedule:
+    - cron: "0 22 * * *"   # 毎日 07:00 JST（UTC 22:00）
+  workflow_dispatch: {}      # 手動実行ボタン
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Send daily report
+        env:
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          REPORT_THEME: ${{ vars.REPORT_THEME }}
+          REPORT_TOP_N: ${{ vars.REPORT_TOP_N }}
+          REPORT_ALL_LIMIT: ${{ vars.REPORT_ALL_LIMIT }}
+        run: python daily_report.py

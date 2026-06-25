@@ -124,3 +124,60 @@ def apply_filters(
     df = pd.DataFrame(filtered)
     df = df.sort_values("per", ascending=True, na_position="last")
     return df.reset_index(drop=True)
+
+
+# 色分けと同じ基準（lower=低いほど良い / higher=高いほど良い）
+_LOWER_TH = {"per": (15, 25), "pbr": (1.0, 3.0), "psr": (1.0, 4.0)}
+_HIGHER_TH = {"equity_ratio": (50, 30), "operating_margin": (10, 5),
+              "revenue_growth": (10, 0), "earnings_growth": (10, 0)}
+
+
+def _point(key, value) -> int | None:
+    """1指標を 0(悪) / 1(ふつう) / 2(良) で採点。データ無しは None"""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    if key in _LOWER_TH:
+        good, bad = _LOWER_TH[key]
+        return 2 if value <= good else (0 if value > bad else 1)
+    if key in _HIGHER_TH:
+        good, bad = _HIGHER_TH[key]
+        return 2 if value >= good else (0 if value < bad else 1)
+    return None
+
+
+def _cat_score(stock, keys) -> float | None:
+    """カテゴリ内の指標を平均して 0〜100 に正規化"""
+    pts = [p for p in (_point(k, stock.get(k)) for k in keys) if p is not None]
+    if not pts:
+        return None
+    return sum(pts) / (2 * len(pts)) * 100
+
+
+def score_stock(stock) -> dict:
+    """銘柄を 0〜100 で総合採点。割安・財務・成長の3カテゴリ平均"""
+    value = _cat_score(stock, ["per", "pbr", "psr"])           # 割安
+    safety = _cat_score(stock, ["equity_ratio"])               # 財務
+    growth = _cat_score(stock, ["operating_margin", "revenue_growth", "earnings_growth"])
+
+    # ネットキャッシュ>時価総額なら財務に加点（タダ株ボーナス）
+    if safety is not None and stock.get("net_cash_over_mcap"):
+        safety = min(100, safety + 25)
+
+    cats = [c for c in (value, safety, growth) if c is not None]
+    score = round(sum(cats) / len(cats)) if cats else 0
+
+    # データが乏しい（3カテゴリ中1つ以下）銘柄は信頼できないので上位に来ないよう抑える
+    low_data = len(cats) < 2
+    if low_data:
+        score = min(score, 55)
+
+    stars = 5 if score >= 80 else 4 if score >= 65 else 3 if score >= 50 else 2 if score >= 35 else 1
+
+    return {
+        "score": score,
+        "stars": "★" * stars + "☆" * (5 - stars),
+        "value_score": None if value is None else round(value),
+        "safety_score": None if safety is None else round(safety),
+        "growth_score": None if growth is None else round(growth),
+        "low_data": low_data,
+    }
