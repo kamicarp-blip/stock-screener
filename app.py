@@ -1,6 +1,6 @@
 import time
 import streamlit as st
-from modules.theme_search import search_kabutan_themes, get_theme_stocks
+from modules.theme_search import resolve_themes, get_theme_stocks_by_name, suggest_themes
 from modules.financial_data import get_financial_data, apply_filters
 from modules.news_fetcher import get_stock_news
 
@@ -113,11 +113,11 @@ PRESET_NOTES = {
     ),
 }
 
-# 中島流：今後10年の未来メタトレンド候補テーマ
+# 中島流：今後10年の未来メタトレンド候補テーマ（株探の正式テーマ名）
 MEGATRENDS = [
-    "生成AI", "フィジカルAI", "ヒューマノイド", "核融合",
-    "量子コンピュータ", "宇宙", "半導体", "水素",
-    "全固体電池", "創薬", "サイバーセキュリティ", "防衛",
+    "フィジカルAI", "人工知能", "核融合発電", "量子コンピューター",
+    "宇宙開発関連", "半導体", "パワー半導体", "データセンター",
+    "全固体電池", "サイバーセキュリティ", "防衛", "ロボット",
 ]
 
 
@@ -246,29 +246,30 @@ if not theme_input.strip():
     st.warning("テーマキーワードを入力してください")
     st.stop()
 
-# Step 1: テーマ検索
-with st.spinner(f"「{theme_input}」のテーマを検索中..."):
-    themes = search_kabutan_themes(theme_input.strip())
+# Step 1: テーマ解決（実際に銘柄が返る正式テーマ名を特定）
+with st.spinner(f"「{theme_input}」に合うテーマを検索中..."):
+    themes = resolve_themes(theme_input.strip())
 
 if not themes:
     st.error(f"「{theme_input}」に一致する株探テーマが見つかりませんでした。")
-    st.info("別のキーワードを試してください（例：AI、半導体、再生エネルギー、ロボット、宇宙）")
+    st.info("👇 こんなテーマ名で試してみてください（株探の正式名称）：")
+    st.write("　".join(f"`{t}`" for t in suggest_themes()))
     st.stop()
 
 # 複数テーマがあれば選択させる
 if len(themes) == 1:
     selected = themes[0]
-    st.success(f"テーマ「{selected['name']}」が見つかりました")
+    st.success(f"テーマ「{selected['name']}」が見つかりました（{selected['count']} 銘柄）")
 else:
-    name = st.selectbox(
+    label = st.selectbox(
         f"{len(themes)} 件のテーマが見つかりました。選んでください：",
-        [t["name"] for t in themes],
+        [f"{t['name']}（{t['count']}銘柄）" for t in themes],
     )
-    selected = next(t for t in themes if t["name"] == name)
+    selected = next(t for t in themes if f"{t['name']}（{t['count']}銘柄）" == label)
 
 # Step 2: 銘柄リスト取得
 with st.spinner("テーマ銘柄リストを取得中..."):
-    raw_stocks = get_theme_stocks(selected["code"])
+    raw_stocks = get_theme_stocks_by_name(selected["name"])
 
 if not raw_stocks:
     st.error("テーマ銘柄が取得できませんでした。時間をおいて再試行してください。")
