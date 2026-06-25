@@ -168,3 +168,18 @@ def suggest_themes(limit: int = 15) -> list[str]:
     """候補が見つからないとき用：人気テーマ名のサンプル"""
     pool = _fetch_popular_themes() or CURATED_THEMES
     return pool[:limit]
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_all_theme_stocks(limit: int = 150) -> list[dict]:
+    """全テーマ（人気＋主要）を横断して銘柄を集約。コード重複は除外、最大 limit 件"""
+    seen, out = set(), []
+    for theme in _theme_pool():
+        for s in get_theme_stocks_by_name(theme):
+            if s["code"] in seen:
+                continue
+            seen.add(s["code"])
+            out.append({**s, "theme": theme})
+            if len(out) >= limit:
+                return out
+    return out

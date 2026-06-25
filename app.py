@@ -1,6 +1,8 @@
 import time
 import streamlit as st
-from modules.theme_search import resolve_themes, get_theme_stocks_by_name, suggest_themes
+from modules.theme_search import (
+    resolve_themes, get_theme_stocks_by_name, suggest_themes, get_all_theme_stocks,
+)
 from modules.financial_data import get_financial_data, apply_filters
 from modules.news_fetcher import get_stock_news
 
@@ -148,9 +150,9 @@ with st.sidebar:
     )
 
     theme_input = st.text_input(
-        "テーマキーワード",
+        "テーマキーワード（空欄なら全テーマ横断）",
         key="theme_box",
-        placeholder="例：核融合、フィジカルAI、量子コンピュータ、水素",
+        placeholder="空欄でも検索OK（全テーマから財務で絞り込み）",
     )
 
     # 中島流のときは未来テーマ候補をボタン表示
@@ -205,6 +207,8 @@ with st.sidebar:
                     help="10%以上が成長企業の目安")
 
     st.divider()
+    all_limit = st.slider("全テーマ検索の最大銘柄数", 30, 300, 100, 10,
+                          help="テーマ未入力のとき、横断する銘柄数の上限（多いほど時間がかかる）")
     show_news = st.checkbox("ニュースを表示", value=True)
     run_btn = st.button("🔍 スクリーニング実行", type="primary", use_container_width=True)
 
@@ -223,7 +227,7 @@ run = run_btn or trigger
 # MAIN
 # ──────────────────────────────────────────
 if not run:
-    st.info("👈 左サイドバーでプリセットを選び、テーマを入力して「スクリーニング実行」を押してください")
+    st.info("👈 左サイドバーでプリセットを選び「スクリーニング実行」を押してください（テーマは空欄でも全テーマ横断で検索できます）")
     with st.expander("💡 使い方"):
         st.markdown(
             """
@@ -241,41 +245,49 @@ if not run:
         )
     st.stop()
 
-theme_input = st.session_state["theme_box"]
-if not theme_input.strip():
-    st.warning("テーマキーワードを入力してください")
-    st.stop()
+theme_input = st.session_state["theme_box"].strip()
 
-# Step 1: テーマ解決（実際に銘柄が返る正式テーマ名を特定）
-with st.spinner(f"「{theme_input}」に合うテーマを検索中..."):
-    themes = resolve_themes(theme_input.strip())
-
-if not themes:
-    st.error(f"「{theme_input}」に一致する株探テーマが見つかりませんでした。")
-    st.info("👇 こんなテーマ名で試してみてください（株探の正式名称）：")
-    st.write("　".join(f"`{t}`" for t in suggest_themes()))
-    st.stop()
-
-# 複数テーマがあれば選択させる
-if len(themes) == 1:
-    selected = themes[0]
-    st.success(f"テーマ「{selected['name']}」が見つかりました（{selected['count']} 銘柄）")
+if not theme_input:
+    # ── 全テーマ横断モード ──
+    st.info("🌐 テーマ未指定 → **全テーマ横断**で財務スクリーニングします（銘柄数が多く時間がかかります）")
+    with st.spinner("全テーマから銘柄を収集中..."):
+        raw_stocks = get_all_theme_stocks(all_limit)
+    if not raw_stocks:
+        st.error("銘柄の収集に失敗しました。時間をおいて再試行してください。")
+        st.stop()
+    st.info(f"全テーマから **{len(raw_stocks)} 銘柄** を収集しました。財務データを取得します")
 else:
-    label = st.selectbox(
-        f"{len(themes)} 件のテーマが見つかりました。選んでください：",
-        [f"{t['name']}（{t['count']}銘柄）" for t in themes],
-    )
-    selected = next(t for t in themes if f"{t['name']}（{t['count']}銘柄）" == label)
+    # ── テーマ指定モード ──
+    # Step 1: テーマ解決（実際に銘柄が返る正式テーマ名を特定）
+    with st.spinner(f"「{theme_input}」に合うテーマを検索中..."):
+        themes = resolve_themes(theme_input)
 
-# Step 2: 銘柄リスト取得
-with st.spinner("テーマ銘柄リストを取得中..."):
-    raw_stocks = get_theme_stocks_by_name(selected["name"])
+    if not themes:
+        st.error(f"「{theme_input}」に一致する株探テーマが見つかりませんでした。")
+        st.info("👇 こんなテーマ名で試してみてください（株探の正式名称）。または空欄で全テーマ検索：")
+        st.write("　".join(f"`{t}`" for t in suggest_themes()))
+        st.stop()
 
-if not raw_stocks:
-    st.error("テーマ銘柄が取得できませんでした。時間をおいて再試行してください。")
-    st.stop()
+    # 複数テーマがあれば選択させる
+    if len(themes) == 1:
+        selected = themes[0]
+        st.success(f"テーマ「{selected['name']}」が見つかりました（{selected['count']} 銘柄）")
+    else:
+        label = st.selectbox(
+            f"{len(themes)} 件のテーマが見つかりました。選んでください：",
+            [f"{t['name']}（{t['count']}銘柄）" for t in themes],
+        )
+        selected = next(t for t in themes if f"{t['name']}（{t['count']}銘柄）" == label)
 
-st.info(f"テーマ「{selected['name']}」: **{len(raw_stocks)} 社** の財務データを取得します（最大40社）")
+    # Step 2: 銘柄リスト取得
+    with st.spinner("テーマ銘柄リストを取得中..."):
+        raw_stocks = get_theme_stocks_by_name(selected["name"])
+
+    if not raw_stocks:
+        st.error("テーマ銘柄が取得できませんでした。時間をおいて再試行してください。")
+        st.stop()
+
+    st.info(f"テーマ「{selected['name']}」: **{len(raw_stocks)} 社** の財務データを取得します（最大40社）")
 
 # Step 3: 財務データ一括取得
 progress = st.progress(0, text="財務データ取得中...")
