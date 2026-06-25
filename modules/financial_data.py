@@ -19,14 +19,25 @@ def get_financial_data(code: str) -> dict | None:
         earn_growth = info.get("earningsGrowth")
         op_margins = info.get("operatingMargins")
 
+        # エミン流指標：PSR と ネットキャッシュ
+        psr = info.get("priceToSalesTrailing12Months")
+        total_cash = info.get("totalCash") or 0
+        total_debt = info.get("totalDebt") or 0
+        net_cash = total_cash - total_debt
+        # ネットキャッシュ（現金 − 有利子負債）が時価総額を上回る ＝「タダ株」
+        net_cash_over_mcap = bool(market_cap > 0 and net_cash >= market_cap)
+
         return {
             "code": code,
             "name": info.get("longName") or info.get("shortName", ""),
             "current_price": info.get("currentPrice") or info.get("regularMarketPrice"),
             "per": _safe(info.get("trailingPE")),
             "pbr": _safe(info.get("priceToBook")),
+            "psr": _safe(psr),
             "equity_ratio": equity_ratio,
             "market_cap_oku": round(market_cap / 1e8, 1) if market_cap else None,
+            "net_cash_oku": round(net_cash / 1e8, 1) if net_cash else None,
+            "net_cash_over_mcap": net_cash_over_mcap,
             "sector": info.get("sector", ""),
             "revenue_growth": round(rev_growth * 100, 1) if rev_growth is not None else None,
             "earnings_growth": round(earn_growth * 100, 1) if earn_growth is not None else None,
@@ -72,13 +83,15 @@ def _calc_equity_ratio(ticker) -> float | None:
 
 def apply_filters(
     stocks: list[dict],
-    per_max: float | None,
-    pbr_max: float | None,
-    equity_ratio_min: float | None,
-    market_cap_min_oku: float | None,
-    revenue_growth_min: float | None,
-    earnings_growth_min: float | None,
-    operating_margin_min: float | None,
+    per_max: float | None = None,
+    pbr_max: float | None = None,
+    equity_ratio_min: float | None = None,
+    market_cap_min_oku: float | None = None,
+    revenue_growth_min: float | None = None,
+    earnings_growth_min: float | None = None,
+    operating_margin_min: float | None = None,
+    psr_max: float | None = None,
+    net_cash_required: bool = False,
 ) -> pd.DataFrame:
     """財務フィルターを適用して DataFrame を返す"""
     filtered = []
@@ -98,6 +111,10 @@ def apply_filters(
         if earnings_growth_min is not None and (s["earnings_growth"] is None or s["earnings_growth"] < earnings_growth_min):
             continue
         if operating_margin_min is not None and (s["operating_margin"] is None or s["operating_margin"] < operating_margin_min):
+            continue
+        if psr_max is not None and (s.get("psr") is None or s["psr"] > psr_max):
+            continue
+        if net_cash_required and not s.get("net_cash_over_mcap"):
             continue
         filtered.append(s)
 
