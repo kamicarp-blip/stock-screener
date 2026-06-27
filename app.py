@@ -386,6 +386,7 @@ cols = ["score", "stars", "buy_label", "code", "name", "current_price", "per", "
         "earnings_growth", "operating_margin", "sector"]
 display_df = df[[c for c in cols if c in df.columns]].copy()
 display_df["株探"] = display_df["code"].map(lambda c: f"https://kabutan.jp/stock/?code={c}")
+display_df["楽天証券"] = display_df["code"].map(lambda c: f"https://www.rakuten-sec.com/web/market/stock/detail/?ric={c}.T")
 
 # 色分けの基準（lower=低いほど良い / higher=高いほど良い）
 _GOOD = "background-color:#dcfce7"   # 緑
@@ -424,6 +425,7 @@ st.dataframe(
         "buy_label": st.column_config.TextColumn("買い時", width=90),
         "code": st.column_config.TextColumn("コード", width=80),
         "name": st.column_config.TextColumn("銘柄名"),
+        "楽天証券": st.column_config.LinkColumn("楽天証券", display_text="楽天で見る"),
         "current_price": st.column_config.NumberColumn("株価（円）", format="%.0f"),
         "per": st.column_config.NumberColumn("PER（倍）", format="%.1f"),
         "pbr": st.column_config.NumberColumn("PBR（倍）", format="%.2f"),
