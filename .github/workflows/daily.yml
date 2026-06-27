@@ -23,7 +23,7 @@ jobs:
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
-          REPORT_THEME: ${{ vars.REPORT_THEME }}
-          REPORT_TOP_N: ${{ vars.REPORT_TOP_N }}
-          REPORT_ALL_LIMIT: ${{ vars.REPORT_ALL_LIMIT }}
+          TOP_THEMES: "6"        # 今日の注目テーマを何件取得するか
+          STOCKS_PER_THEME: "15" # 各テーマから最大何銘柄
+          REPORT_TOP_N: "10"     # メールに載せる買い場銘柄の上限
         run: python daily_report.py
