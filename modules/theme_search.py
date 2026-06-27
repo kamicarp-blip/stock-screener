@@ -250,3 +250,66 @@ def get_all_theme_stocks(limit: int = 150) -> list[dict]:
             if len(out) >= limit:
                 return out
     return out
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_kabutan_name(code: str) -> str:
+    """株探の銘柄ページから日本語社名を取得"""
+    try:
+        r = requests.get(
+            f"https://kabutan.jp/stock/?code={code}", headers=HEADERS, timeout=10
+        )
+        if r.status_code != 200:
+            return code
+        r.encoding = "utf-8"
+        soup = BeautifulSoup(r.text, "html.parser")
+        title = soup.find("title")
+        if title:
+            t = title.get_text(strip=True)
+            for sep in ("【", "（", "の株価", " 株価"):
+                if sep in t:
+                    return t.split(sep)[0].strip()
+        return code
+    except Exception:
+        return code
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def search_stocks(query: str) -> list[dict]:
+    """銘柄コード（4桁）または会社名で検索。Yahoo Finance API + 株探で日本語名を補完"""
+    query = query.strip()
+    if not query:
+        return []
+
+    # 4桁コード直接指定
+    if re.match(r"^\d{4}$", query):
+        name = get_kabutan_name(query)
+        return [{"code": query, "name": name}]
+
+    # Yahoo Finance 検索 API
+    try:
+        r = requests.get(
+            "https://query1.finance.yahoo.com/v1/finance/search",
+            params={"q": query, "lang": "ja", "region": "JP",
+                    "quotesCount": 10, "newsCount": 0},
+            headers={"User-Agent": HEADERS["User-Agent"]},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return []
+        results = []
+        for q in r.json().get("quotes", []):
+            sym = q.get("symbol", "")
+            if not sym.endswith(".T"):
+                continue
+            code = sym[:-2]
+            if code < "1300":
+                continue
+            # 株探から日本語名を取得
+            name = get_kabutan_name(code)
+            if name == code:
+                name = q.get("shortname") or q.get("longname") or code
+            results.append({"code": code, "name": name})
+        return results[:8]
+    except Exception:
+        return []

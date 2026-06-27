@@ -3,6 +3,7 @@ import pandas as pd
 import streamlit as st
 from modules.theme_search import (
     resolve_themes, get_theme_stocks_by_name, suggest_themes, get_all_theme_stocks,
+    search_stocks, get_kabutan_name,
 )
 from modules.financial_data import get_financial_data, apply_filters, score_stock
 from modules.price_signal import buy_timing
@@ -238,6 +239,15 @@ with st.sidebar:
     show_news = st.checkbox("ニュースを表示", value=True)
     run_btn = st.button("🔍 スクリーニング実行", type="primary", use_container_width=True)
 
+    st.divider()
+    st.subheader("📊 銘柄を直接調べる")
+    st.text_input(
+        "銘柄コード（4桁）または会社名",
+        key="stock_query",
+        placeholder="例: 7203 または トヨタ、任天堂",
+    )
+    search_btn = st.button("🔍 調べる", use_container_width=True)
+
 # プリセットの根拠を本文上部に表示
 note = PRESET_NOTES.get(st.session_state["preset_sel"])
 if note:
@@ -248,12 +258,13 @@ if note:
 # テーマボタン経由の実行トリガー
 trigger = st.session_state.pop("trigger_run", False)
 run = run_btn or trigger
+search_run = search_btn
 
 # ──────────────────────────────────────────
 # MAIN
 # ──────────────────────────────────────────
-if not run:
-    st.info("👈 左サイドバーでプリセットを選び「スクリーニング実行」を押してください（テーマは空欄でも全テーマ横断で検索できます）")
+if not run and not search_run:
+    st.info("👈 左サイドバーから検索できます。テーマ・業種で絞り込む場合は「スクリーニング実行」、特定の銘柄を調べる場合は下の「調べる」ボタンを使ってください")
     with st.expander("💡 使い方"):
         st.markdown(
             """
@@ -271,66 +282,95 @@ if not run:
         )
     st.stop()
 
-theme_input = st.session_state["theme_box"].strip()
-industry_sel = st.session_state.get("industry_sel", "（業種で絞らない）")
+skip_filters = False  # 銘柄直接検索のときはフィルター不要
 
-if not theme_input and industry_sel != "（業種で絞らない）":
-    # ── 業種指定モード ──
-    mapped_themes = INDUSTRY_MAP.get(industry_sel, [])
-    st.info(f"業種「{industry_sel}」の関連テーマ（{len(mapped_themes)}件）から銘柄を収集します")
-    with st.spinner("銘柄を収集中..."):
-        seen_codes, raw_stocks = set(), []
-        for theme_name in mapped_themes:
-            for s in get_theme_stocks_by_name(theme_name):
-                if s["code"] not in seen_codes:
-                    seen_codes.add(s["code"])
-                    raw_stocks.append(s)
-    if not raw_stocks:
-        st.error("銘柄の収集に失敗しました。時間をおいて再試行してください。")
-        st.stop()
-    st.info(f"**{len(raw_stocks)} 銘柄** を収集しました。財務データを取得します")
-
-elif not theme_input:
-    # ── 全テーマ横断モード ──
-    st.info("🌐 テーマ未指定 → **全テーマ横断**で財務スクリーニングします（銘柄数が多く時間がかかります）")
-    with st.spinner("全テーマから銘柄を収集中..."):
-        raw_stocks = get_all_theme_stocks(all_limit)
-    if not raw_stocks:
-        st.error("銘柄の収集に失敗しました。時間をおいて再試行してください。")
-        st.stop()
-    st.info(f"全テーマから **{len(raw_stocks)} 銘柄** を収集しました。財務データを取得します")
-else:
-    # ── テーマ指定モード ──
-    # Step 1: テーマ解決（実際に銘柄が返る正式テーマ名を特定）
-    with st.spinner(f"「{theme_input}」に合うテーマを検索中..."):
-        themes = resolve_themes(theme_input)
-
-    if not themes:
-        st.error(f"「{theme_input}」に一致する株探テーマが見つかりませんでした。")
-        st.info("👇 こんなテーマ名で試してみてください（株探の正式名称）。または空欄で全テーマ検索：")
-        st.write("　".join(f"`{t}`" for t in suggest_themes()))
+if search_run:
+    # ── 銘柄直接検索モード ──
+    stock_query = st.session_state.get("stock_query", "").strip()
+    if not stock_query:
+        st.warning("銘柄コード（4桁）または会社名を入力してください")
         st.stop()
 
-    # 複数テーマがあれば選択させる
-    if len(themes) == 1:
-        selected = themes[0]
-        st.success(f"テーマ「{selected['name']}」が見つかりました（{selected['count']} 銘柄）")
-    else:
+    with st.spinner(f"「{stock_query}」を検索中..."):
+        candidates = search_stocks(stock_query)
+
+    if not candidates:
+        st.error(f"「{stock_query}」に一致する銘柄が見つかりませんでした。4桁の銘柄コードで試してみてください。")
+        st.stop()
+
+    if len(candidates) > 1:
         label = st.selectbox(
-            f"{len(themes)} 件のテーマが見つかりました。選んでください：",
-            [f"{t['name']}（{t['count']}銘柄）" for t in themes],
+            f"「{stock_query}」に {len(candidates)} 件見つかりました。選んでください：",
+            [f"{c['name']}（{c['code']}）" for c in candidates],
         )
-        selected = next(t for t in themes if f"{t['name']}（{t['count']}銘柄）" == label)
+        chosen = next(c for c in candidates if f"{c['name']}（{c['code']}）" == label)
+        raw_stocks = [chosen]
+    else:
+        raw_stocks = candidates
+        st.success(f"**{candidates[0]['name']}**（{candidates[0]['code']}）の情報を取得します")
 
-    # Step 2: 銘柄リスト取得
-    with st.spinner("テーマ銘柄リストを取得中..."):
-        raw_stocks = get_theme_stocks_by_name(selected["name"])
+    skip_filters = True  # フィルターをかけず必ず表示
 
-    if not raw_stocks:
-        st.error("テーマ銘柄が取得できませんでした。時間をおいて再試行してください。")
-        st.stop()
+else:
+    # ── テーマ・業種検索モード ──
+    theme_input = st.session_state["theme_box"].strip()
+    industry_sel = st.session_state.get("industry_sel", "（業種で絞らない）")
 
-    st.info(f"テーマ「{selected['name']}」: **{len(raw_stocks)} 社** の財務データを取得します（最大40社）")
+    if not theme_input and industry_sel != "（業種で絞らない）":
+        # 業種指定モード
+        mapped_themes = INDUSTRY_MAP.get(industry_sel, [])
+        st.info(f"業種「{industry_sel}」の関連テーマ（{len(mapped_themes)}件）から銘柄を収集します")
+        with st.spinner("銘柄を収集中..."):
+            seen_codes, raw_stocks = set(), []
+            for theme_name in mapped_themes:
+                for s in get_theme_stocks_by_name(theme_name):
+                    if s["code"] not in seen_codes:
+                        seen_codes.add(s["code"])
+                        raw_stocks.append(s)
+        if not raw_stocks:
+            st.error("銘柄の収集に失敗しました。時間をおいて再試行してください。")
+            st.stop()
+        st.info(f"**{len(raw_stocks)} 銘柄** を収集しました。財務データを取得します")
+
+    elif not theme_input:
+        # 全テーマ横断モード
+        st.info("🌐 テーマ未指定 → **全テーマ横断**で財務スクリーニングします（銘柄数が多く時間がかかります）")
+        with st.spinner("全テーマから銘柄を収集中..."):
+            raw_stocks = get_all_theme_stocks(all_limit)
+        if not raw_stocks:
+            st.error("銘柄の収集に失敗しました。時間をおいて再試行してください。")
+            st.stop()
+        st.info(f"全テーマから **{len(raw_stocks)} 銘柄** を収集しました。財務データを取得します")
+
+    else:
+        # テーマ指定モード
+        with st.spinner(f"「{theme_input}」に合うテーマを検索中..."):
+            themes = resolve_themes(theme_input)
+
+        if not themes:
+            st.error(f"「{theme_input}」に一致する株探テーマが見つかりませんでした。")
+            st.info("👇 こんなテーマ名で試してみてください（株探の正式名称）。または空欄で全テーマ検索：")
+            st.write("　".join(f"`{t}`" for t in suggest_themes()))
+            st.stop()
+
+        if len(themes) == 1:
+            selected = themes[0]
+            st.success(f"テーマ「{selected['name']}」が見つかりました（{selected['count']} 銘柄）")
+        else:
+            label = st.selectbox(
+                f"{len(themes)} 件のテーマが見つかりました。選んでください：",
+                [f"{t['name']}（{t['count']}銘柄）" for t in themes],
+            )
+            selected = next(t for t in themes if f"{t['name']}（{t['count']}銘柄）" == label)
+
+        with st.spinner("テーマ銘柄リストを取得中..."):
+            raw_stocks = get_theme_stocks_by_name(selected["name"])
+
+        if not raw_stocks:
+            st.error("テーマ銘柄が取得できませんでした。時間をおいて再試行してください。")
+            st.stop()
+
+        st.info(f"テーマ「{selected['name']}」: **{len(raw_stocks)} 社** の財務データを取得します（最大40社）")
 
 # Step 3: 財務データ一括取得
 progress = st.progress(0, text="財務データ取得中...")
@@ -346,20 +386,23 @@ for i, stock in enumerate(raw_stocks):
 
 progress.empty()
 
-# Step 4: フィルタリング
+# Step 4: フィルタリング（銘柄直接検索の場合はフィルターなし）
 ss = st.session_state
-df = apply_filters(
-    financial_data,
-    per_max=ss["per_max"] if ss["per_on"] else None,
-    pbr_max=ss["pbr_max"] if ss["pbr_on"] else None,
-    equity_ratio_min=ss["eq_min"] if ss["eq_on"] else None,
-    market_cap_min_oku=ss["mc_min"] if ss["mc_on"] else None,
-    revenue_growth_min=ss["rg_min"] if ss["rg_on"] else None,
-    earnings_growth_min=ss["eg_min"] if ss["eg_on"] else None,
-    operating_margin_min=ss["om_min"] if ss["om_on"] else None,
-    psr_max=ss["psr_max"] if ss["psr_on"] else None,
-    net_cash_required=ss["nc_on"],
-)
+if skip_filters:
+    df = apply_filters(financial_data)  # フィルターなし（全パラメータがNone = 全通過）
+else:
+    df = apply_filters(
+        financial_data,
+        per_max=ss["per_max"] if ss["per_on"] else None,
+        pbr_max=ss["pbr_max"] if ss["pbr_on"] else None,
+        equity_ratio_min=ss["eq_min"] if ss["eq_on"] else None,
+        market_cap_min_oku=ss["mc_min"] if ss["mc_on"] else None,
+        revenue_growth_min=ss["rg_min"] if ss["rg_on"] else None,
+        earnings_growth_min=ss["eg_min"] if ss["eg_on"] else None,
+        operating_margin_min=ss["om_min"] if ss["om_on"] else None,
+        psr_max=ss["psr_max"] if ss["psr_on"] else None,
+        net_cash_required=ss["nc_on"],
+    )
 
 st.divider()
 
@@ -373,8 +416,8 @@ df["score"] = [s["score"] for s in _scores]
 df["stars"] = [s["stars"] for s in _scores]
 df = df.sort_values("score", ascending=False).reset_index(drop=True)
 
-# 任意：買い時シグナル
-if show_signal:
+# 任意：買い時シグナル（銘柄直接検索は1社なので常に計算）
+if show_signal or skip_filters:
     with st.spinner("買い時シグナルを計算中..."):
         labels = []
         for _, r in df.iterrows():
@@ -382,7 +425,10 @@ if show_signal:
             labels.append(bt["label"] if bt else "－")
         df["buy_label"] = labels
 
-st.success(f"✅ **{len(df)} 社** が条件に一致しました（{len(raw_stocks)} 社中）／総合スコアの高い順")
+if skip_filters:
+    st.success(f"✅ **{df.iloc[0]['name']}**（{df.iloc[0]['code']}）の財務データ・買い時シグナル")
+else:
+    st.success(f"✅ **{len(df)} 社** が条件に一致しました（{len(raw_stocks)} 社中）／総合スコアの高い順")
 
 # 凡例
 with st.expander("🎨 色分けの見方（クリックで開く）", expanded=True):
