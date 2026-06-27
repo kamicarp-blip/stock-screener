@@ -117,6 +117,21 @@ PRESET_NOTES = {
     ),
 }
 
+# 業種 → 株探テーマ名マッピング（四季報33業種ベース）
+INDUSTRY_MAP = {
+    "💻 情報・通信・AI":        ["人工知能", "DX", "データセンター", "サイバーセキュリティ", "SaaS", "IoT", "5G", "6G"],
+    "⚡ 電気機器・半導体":       ["半導体", "半導体製造装置", "パワー半導体", "半導体部材・部品"],
+    "🤖 機械・ロボット・自動化": ["ロボット", "フィジカルAI", "自動運転", "ドローン"],
+    "🔬 医薬品・バイオ":         ["バイオ", "創薬", "ゲノム編集", "再生医療", "認知症"],
+    "🌍 エネルギー・環境":       ["核融合発電", "水素", "燃料電池", "全固体電池", "洋上風力", "再生可能エネルギー", "GX"],
+    "🚀 宇宙・防衛":             ["宇宙開発関連", "防衛"],
+    "💰 金融・フィンテック":     ["ステーブルコイン", "暗号資産", "ブロックチェーン", "銀行", "地方銀行"],
+    "🚢 運輸・物流":             ["海運"],
+    "⚗️ 素材・化学":             ["レアアース", "アンモニア", "蓄電池"],
+    "🛍️ 消費・サービス":         ["インバウンド", "メタバース"],
+    "🔮 量子・先端技術":         ["量子コンピューター"],
+}
+
 # 中島流：今後10年の未来メタトレンド候補テーマ（株探の正式テーマ名）
 MEGATRENDS = [
     "フィジカルAI", "人工知能", "核融合発電", "量子コンピューター",
@@ -152,9 +167,16 @@ with st.sidebar:
     )
 
     theme_input = st.text_input(
-        "テーマキーワード（空欄なら全テーマ横断）",
+        "テーマキーワード（ニュアンスでもOK）",
         key="theme_box",
-        placeholder="空欄でも検索OK（全テーマから財務で絞り込み）",
+        placeholder="例：脱炭素、ロボティクス、バイオテック…",
+    )
+
+    st.selectbox(
+        "または業種から選ぶ（四季報33業種ベース）",
+        ["（業種で絞らない）"] + list(INDUSTRY_MAP.keys()),
+        key="industry_sel",
+        help="テーマキーワードを入力した場合はそちらが優先されます",
     )
 
     # 中島流のときは未来テーマ候補をボタン表示
@@ -250,8 +272,25 @@ if not run:
     st.stop()
 
 theme_input = st.session_state["theme_box"].strip()
+industry_sel = st.session_state.get("industry_sel", "（業種で絞らない）")
 
-if not theme_input:
+if not theme_input and industry_sel != "（業種で絞らない）":
+    # ── 業種指定モード ──
+    mapped_themes = INDUSTRY_MAP.get(industry_sel, [])
+    st.info(f"業種「{industry_sel}」の関連テーマ（{len(mapped_themes)}件）から銘柄を収集します")
+    with st.spinner("銘柄を収集中..."):
+        seen_codes, raw_stocks = set(), []
+        for theme_name in mapped_themes:
+            for s in get_theme_stocks_by_name(theme_name):
+                if s["code"] not in seen_codes:
+                    seen_codes.add(s["code"])
+                    raw_stocks.append(s)
+    if not raw_stocks:
+        st.error("銘柄の収集に失敗しました。時間をおいて再試行してください。")
+        st.stop()
+    st.info(f"**{len(raw_stocks)} 銘柄** を収集しました。財務データを取得します")
+
+elif not theme_input:
     # ── 全テーマ横断モード ──
     st.info("🌐 テーマ未指定 → **全テーマ横断**で財務スクリーニングします（銘柄数が多く時間がかかります）")
     with st.spinner("全テーマから銘柄を収集中..."):
