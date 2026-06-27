@@ -276,7 +276,7 @@ def get_kabutan_name(code: str) -> str:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def search_stocks(query: str) -> list[dict]:
-    """銘柄コード（4桁）または会社名で検索。Yahoo Finance API + 株探で日本語名を補完"""
+    """銘柄コード（4桁）または会社名で株探を検索"""
     query = query.strip()
     if not query:
         return []
@@ -286,29 +286,31 @@ def search_stocks(query: str) -> list[dict]:
         name = get_kabutan_name(query)
         return [{"code": query, "name": name}]
 
-    # Yahoo Finance 検索 API
+    # 株探 /search/ を使用（結果リンクは /search/linkcompany?code=XXXX 形式）
     try:
         r = requests.get(
-            "https://query1.finance.yahoo.com/v1/finance/search",
-            params={"q": query, "lang": "ja", "region": "JP",
-                    "quotesCount": 10, "newsCount": 0},
-            headers={"User-Agent": HEADERS["User-Agent"]},
-            timeout=10,
+            "https://kabutan.jp/search/",
+            params={"q": query},
+            headers=HEADERS,
+            timeout=15,
         )
         if r.status_code != 200:
             return []
-        results = []
-        for q in r.json().get("quotes", []):
-            sym = q.get("symbol", "")
-            if not sym.endswith(".T"):
+        r.encoding = "utf-8"
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        results, seen = [], set()
+        for a in soup.find_all("a", href=lambda x: x and "/search/linkcompany?code=" in x):
+            m = re.search(r"code=(\d{4,5})", a["href"])
+            if not m:
                 continue
-            code = sym[:-2]
-            if code < "1300":
+            code = m.group(1)
+            if code < "1300" or code in seen:
                 continue
-            # 株探から日本語名を取得
-            name = get_kabutan_name(code)
-            if name == code:
-                name = q.get("shortname") or q.get("longname") or code
+            seen.add(code)
+            name = a.get_text(strip=True)
+            if not name or name.isdigit():
+                name = get_kabutan_name(code)
             results.append({"code": code, "name": name})
         return results[:8]
     except Exception:
