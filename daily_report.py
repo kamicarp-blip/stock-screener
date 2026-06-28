@@ -1,13 +1,8 @@
-"""毎朝メール：今日の注目テーマ × 今日が買い場の株
+"""毎朝メール：今日の注目テーマ × スコア上位銘柄（過熱株を除く）
 
-流れ：
-  1. 株探アクセスランキングから「今日の注目テーマ」を取得（毎日変わる）
-  2. 各テーマの銘柄を収集
-  3. 買い時シグナル（移動平均・RSI）で🟢買い場の株だけに絞る
-  4. 総合スコア順にメール送信
-
-GMAIL_ADDRESS / GMAIL_APP_PASSWORD が未設定の場合は
-daily_report.html に書き出すDRY RUNモード。
+変更点：
+  以前は🟢買い場のみ → ほぼ毎日ゼロ銘柄になる問題があった。
+  現在は「🔴過熱を除いたスコア上位」を送信。🟢を先に表示し参考情報として活用。
 """
 import os
 import ssl
@@ -22,20 +17,18 @@ from modules.financial_data import get_financial_data, score_stock
 from modules.price_signal import buy_timing
 
 # ── 設定 ──────────────────────────────────────────
-TOP_THEMES = int(os.environ.get("TOP_THEMES", "6").strip() or "6")   # 使うテーマ数
-STOCKS_PER_THEME = int(os.environ.get("STOCKS_PER_THEME", "15").strip() or "15")  # 各テーマの銘柄数
-TOP_N = int(os.environ.get("REPORT_TOP_N", "10").strip() or "10")    # メールに載せる上位件数
+TOP_THEMES        = int(os.environ.get("TOP_THEMES",        "8").strip()  or "8")
+STOCKS_PER_THEME  = int(os.environ.get("STOCKS_PER_THEME",  "20").strip() or "20")
+TOP_N             = int(os.environ.get("REPORT_TOP_N",      "12").strip() or "12")
 # ──────────────────────────────────────────────────
 
 
 def build_todays_report() -> tuple[list[dict], list[str]]:
-    """
-    今日の注目テーマを取得し、🟢買い場の株だけ返す。
-    戻り値: (買い場銘柄リスト, 今日のテーマ名リスト)
-    """
+    """今日の注目テーマから、過熱していないスコア上位銘柄を返す。"""
+
     # ① 今日の人気テーマを取得
     todays_themes = get_trending_themes(TOP_THEMES)
-    print(f"今日のテーマ: {todays_themes}")
+    print(f"今日のテーマ（{len(todays_themes)}件）: {todays_themes}")
 
     # ② 各テーマから銘柄を収集（重複除去）
     seen_codes, raw_stocks = set(), []
@@ -44,38 +37,56 @@ def build_todays_report() -> tuple[list[dict], list[str]]:
             if s["code"] not in seen_codes:
                 seen_codes.add(s["code"])
                 raw_stocks.append({**s, "theme": theme})
-
     print(f"銘柄収集: {len(raw_stocks)} 社")
 
-    # ③ 財務データ取得 + 買い時判定 → 🟢のみ抽出
-    buy_candidates = []
+    # ③ 財務データ取得 + スコア計算
+    scored = []
     for s in raw_stocks:
-        # 買い時シグナルを先に判定（🟢でなければスキップ → 財務取得を省略）
-        bt = buy_timing(s["code"])
-        if not bt or bt["signal"] != "buy":
-            time.sleep(0.1)
-            continue
-
         fin = get_financial_data(s["code"])
         if not fin:
             time.sleep(0.1)
             continue
-
-        fin["name"] = s["name"]  # 株探の日本語名を優先
+        fin["name"]  = s["name"]
         fin["theme"] = s["theme"]
-        row = {**fin, **score_stock(fin),
-               "buy_label": bt["label"],
-               "buy_reason": bt["reasons"],
-               "prev_change": bt["prev_change"],
-               "rsi": bt["rsi"],
-               "dev25": bt["dev25"]}
-        buy_candidates.append(row)
-        print(f"  🟢 {s['name']}（{s['code']}）{bt['reasons']}")
-        time.sleep(0.2)
+        scored.append({**fin, **score_stock(fin)})
+        time.sleep(0.15)
 
-    # ④ スコア順に並べてトップN件
-    buy_candidates.sort(key=lambda x: x["score"], reverse=True)
-    return buy_candidates[:TOP_N], todays_themes
+    # スコア上位から評価
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    print(f"財務データ取得: {len(scored)} 社（スコア計算済み）")
+
+    # ④ スコア上位から買い時シグナルを判定（上位 N*4 件まで）
+    results = []
+    eval_limit = min(len(scored), TOP_N * 4)
+
+    for d in scored[:eval_limit]:
+        bt = buy_timing(d["code"])
+        if not bt:
+            time.sleep(0.1)
+            continue
+
+        if bt["signal"] == "hot":
+            print(f"  🔴 除外（過熱）: {d['name']}（{d['code']}）")
+            time.sleep(0.1)
+            continue
+
+        row = {**d,
+               "buy_label":   bt["label"],
+               "buy_reason":  bt["reasons"],
+               "prev_change": bt["prev_change"],
+               "rsi":         bt["rsi"],
+               "dev25":       bt["dev25"],
+               "_sig_order":  0 if bt["signal"] == "buy" else 1}
+        results.append(row)
+        print(f"  {bt['label']} {d['name']}（{d['code']}）score={d['score']}")
+        time.sleep(0.15)
+
+        if len(results) >= TOP_N * 2:
+            break
+
+    # ⑤ 🟢を先に、同シグナル内はスコア順
+    results.sort(key=lambda x: (x["_sig_order"], -x["score"]))
+    return results[:TOP_N], todays_themes
 
 
 # ── HTML生成 ──────────────────────────────────────
@@ -99,11 +110,9 @@ def _chg_color(v):
 def render_html(rows: list[dict], todays_themes: list[str]) -> str:
     today = datetime.now().strftime("%Y/%m/%d (%a)")
 
-    # テーマリスト
     theme_badges = "".join(
         f'<span style="display:inline-block;margin:3px;padding:3px 10px;'
-        f'background:#fef3c7;border-radius:12px;font-size:12px;color:#92400e;">'
-        f'{t}</span>'
+        f'background:#fef3c7;border-radius:12px;font-size:12px;color:#92400e;">{t}</span>'
         for t in todays_themes
     )
     theme_section = f"""
@@ -111,24 +120,36 @@ def render_html(rows: list[dict], todays_themes: list[str]) -> str:
       <p style="color:#64748b;font-size:12px;margin-top:-8px;">株探アクセスランキング（本日の人気順）</p>
       <div style="margin-bottom:16px;">{theme_badges}</div>"""
 
-    # 銘柄なし
     if not rows:
-        return f"""<div style="font-family:'Hiragino Kaku Gothic Pro','Yu Gothic',sans-serif;
-                               color:#1e293b;max-width:700px;">
-          <h2 style="color:#2563eb;">📈 本日の買い場レポート（{today}）</h2>
+        return f"""<div style="font-family:'Hiragino Kaku Gothic Pro','Yu Gothic',sans-serif;color:#1e293b;max-width:700px;">
+          <h2 style="color:#2563eb;">📈 本日の注目銘柄レポート（{today}）</h2>
           {theme_section}
           <p style="background:#f1f5f9;padding:12px;border-radius:8px;">
-            本日は上記テーマ内に<b>🟢買い場の銘柄がありませんでした</b>。<br>
-            <span style="font-size:12px;color:#64748b;">相場が落ち着いている、または過熱ぎみの可能性があります。</span>
+            本日は上記テーマ内に表示できる銘柄がありませんでした（データ取得エラーの可能性）。
           </p>
           <p style="color:#94a3b8;font-size:11px;">※ 自動生成。投資助言ではありません。</p>
         </div>"""
 
-    # 銘柄テーブル
+    # 🟢の件数を数えてタイトルを変える
+    buy_count = sum(1 for r in rows if r.get("buy_label", "").startswith("🟢"))
+    if buy_count > 0:
+        subtitle = f"🟢買い場候補 <b>{buy_count}銘柄</b>を含む注目 {len(rows)}銘柄"
+    else:
+        subtitle = f"今日の注目テーマから過熱を除いたスコア上位 {len(rows)}銘柄"
+
     trs = []
     for i, r in enumerate(rows, 1):
         link = f"https://kabutan.jp/stock/?code={r['code']}"
-        pc = r.get("prev_change")
+        pc   = r.get("prev_change")
+        lbl  = r.get("buy_label", "⬜")
+        reason = r.get("buy_reason", "")
+
+        # 買い場ラベルの背景色
+        if lbl.startswith("🟢"):
+            lbl_bg = "#dcfce7"
+        else:
+            lbl_bg = "#f1f5f9"
+
         trs.append(f"""
         <tr style="border-bottom:1px solid #e2e8f0;">
           <td style="padding:8px 6px;text-align:center;color:#64748b;font-size:12px;">{i}</td>
@@ -136,10 +157,11 @@ def render_html(rows: list[dict], todays_themes: list[str]) -> str:
             <span style="font-weight:bold;color:{_score_color(r['score'])};">{r['score']}点</span><br>
             <span style="font-size:11px;color:#f59e0b;">{r['stars']}</span>
           </td>
+          <td style="padding:6px 8px;text-align:center;background:{lbl_bg};border-radius:6px;font-size:12px;white-space:nowrap;">{lbl}</td>
           <td style="padding:8px 6px;">
             <a href="{link}" style="color:#2563eb;text-decoration:none;font-weight:bold;">{r['name']}</a><br>
-            <span style="font-size:11px;color:#64748b;">{r['code']} ／ {r.get('theme','')}</span><br>
-            <span style="font-size:11px;color:#16a34a;">{r.get('buy_reason','')}</span>
+            <span style="font-size:11px;color:#64748b;">{r['code']} ／ {r.get('theme','')}</span>
+            {"<br><span style='font-size:11px;color:#16a34a;'>" + reason + "</span>" if reason else ""}
           </td>
           <td style="padding:8px 6px;text-align:right;color:{_chg_color(pc)};font-weight:bold;">{_fmt(pc,'%',2)}</td>
           <td style="padding:8px 6px;text-align:right;font-size:12px;">{_fmt(r.get('per'),'倍')}</td>
@@ -147,20 +169,17 @@ def render_html(rows: list[dict], todays_themes: list[str]) -> str:
           <td style="padding:8px 6px;text-align:right;font-size:12px;">{_fmt(r.get('equity_ratio'),'%')}</td>
         </tr>""")
 
-    return f"""<div style="font-family:'Hiragino Kaku Gothic Pro','Yu Gothic',sans-serif;
-                           color:#1e293b;max-width:700px;">
-      <h2 style="color:#2563eb;margin-bottom:4px;">📈 本日の買い場レポート（{today}）</h2>
-      <p style="color:#64748b;font-size:12px;margin-top:0;">
-        今日の注目テーマ × 🟢買い場シグナルで絞った銘柄／スコア順
-      </p>
+    return f"""<div style="font-family:'Hiragino Kaku Gothic Pro','Yu Gothic',sans-serif;color:#1e293b;max-width:720px;">
+      <h2 style="color:#2563eb;margin-bottom:4px;">📈 本日の注目銘柄レポート（{today}）</h2>
+      <p style="color:#64748b;font-size:12px;margin-top:0;">{subtitle}</p>
       {theme_section}
-      <h3 style="color:#16a34a;">🟢 本日の買い場候補 {len(rows)} 銘柄</h3>
       <table style="border-collapse:collapse;width:100%;font-size:13px;">
         <thead>
           <tr style="background:#f1f5f9;font-size:12px;">
             <th style="padding:6px;">#</th>
             <th style="padding:6px;">スコア</th>
-            <th style="padding:6px;text-align:left;">銘柄 ／ テーマ ／ 買い場の理由</th>
+            <th style="padding:6px;">買い時</th>
+            <th style="padding:6px;text-align:left;">銘柄 ／ テーマ</th>
             <th style="padding:6px;">前日比</th>
             <th style="padding:6px;">PER</th>
             <th style="padding:6px;">PBR</th>
@@ -169,13 +188,13 @@ def render_html(rows: list[dict], todays_themes: list[str]) -> str:
         </thead>
         <tbody>{''.join(trs)}</tbody>
       </table>
-      <div style="background:#f0fdf4;border-left:3px solid #16a34a;padding:8px 12px;margin-top:12px;font-size:12px;">
-        <b>🟢買い場の判断基準：</b>上昇トレンド（株価＞75日線）かつ、
-        押し目（25日線付近）またはゴールデンクロスまたはRSI健全（30〜55）
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 14px;margin-top:14px;font-size:12px;">
+        <b>買い時シグナルの見方：</b><br>
+        🟢 買い場 ＝ 上昇トレンド（株価＞75日線）＋ 押し目 or ゴールデンクロス or RSI健全<br>
+        ⬜ 中立 ＝ 条件は揃っていないが過熱でもない（自分で判断）<br>
+        🔴 過熱 ＝ このメールでは除外（RSI75超 or 25日線から15%以上上昇）
       </div>
-      <p style="color:#94a3b8;font-size:11px;margin-top:12px;">
-        ※ 自動生成。投資助言ではありません。最終判断はご自身で。
-      </p>
+      <p style="color:#94a3b8;font-size:11px;margin-top:12px;">※ 自動生成。投資助言ではありません。最終判断はご自身で。</p>
     </div>"""
 
 
@@ -183,8 +202,8 @@ def render_html(rows: list[dict], todays_themes: list[str]) -> str:
 
 def send(html: str):
     addr = os.environ.get("GMAIL_ADDRESS")
-    pw = os.environ.get("GMAIL_APP_PASSWORD")
-    to = os.environ.get("MAIL_TO", addr)
+    pw   = os.environ.get("GMAIL_APP_PASSWORD")
+    to   = os.environ.get("MAIL_TO", addr)
 
     if not (addr and pw):
         with open("daily_report.html", "w", encoding="utf-8") as f:
@@ -193,9 +212,9 @@ def send(html: str):
         return
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"📈 本日の買い場レポート {datetime.now():%m/%d}"
-    msg["From"] = addr
-    msg["To"] = to
+    msg["Subject"] = f"📈 本日の注目銘柄レポート {datetime.now():%m/%d}"
+    msg["From"]    = addr
+    msg["To"]      = to
     msg.attach(MIMEText(html, "html", "utf-8"))
 
     ctx = ssl.create_default_context()
@@ -207,5 +226,5 @@ def send(html: str):
 
 if __name__ == "__main__":
     rows, themes = build_todays_report()
-    print(f"買い場銘柄: {len(rows)} 件")
+    print(f"送信銘柄: {len(rows)} 件")
     send(render_html(rows, themes))
