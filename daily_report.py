@@ -1,34 +1,57 @@
-"""毎朝メール：今日の注目テーマ × スコア上位銘柄（過熱株を除く）
+"""毎朝メール：高市政権の国策テーマ × スコア上位銘柄（過熱株を除く）
 
-変更点：
-  以前は🟢買い場のみ → ほぼ毎日ゼロ銘柄になる問題があった。
-  現在は「🔴過熱を除いたスコア上位」を送信。🟢を先に表示し参考情報として活用。
+対象テーマ：核融合・レアアース・フィジカルAI・ロボット・宇宙・創薬・
+半導体・量子コンピューター など、高市政権の重点17分野ベースの国策テーマ。
+
+ロジック：
+  各国策テーマの銘柄を収集 → 財務スコア計算 → 🔴過熱を除外 →
+  🟢買い場を上位に、スコア順でメール送信。
 """
 import os
 import ssl
+import sys
 import time
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 
+# Windowsコンソール(cp932)でも絵文字ログが出せるようUTF-8に
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 from modules.theme_search import get_trending_themes, get_theme_stocks_by_name
 from modules.financial_data import get_financial_data, score_stock
 from modules.price_signal import buy_timing
 
+# ── 国策テーマ（高市政権の重点分野ベース。株探で銘柄が返る正式名）──
+KOKUSAKU_THEMES = [
+    "核融合発電", "レアアース", "フィジカルAI", "ロボット",
+    "宇宙開発関連", "創薬", "半導体", "半導体製造装置",
+    "パワー半導体", "量子コンピューター", "人工知能",
+    "防衛", "サイバーセキュリティ",
+]
+
 # ── 設定 ──────────────────────────────────────────
-TOP_THEMES        = int(os.environ.get("TOP_THEMES",        "8").strip()  or "8")
-STOCKS_PER_THEME  = int(os.environ.get("STOCKS_PER_THEME",  "20").strip() or "20")
-TOP_N             = int(os.environ.get("REPORT_TOP_N",      "12").strip() or "12")
+STOCKS_PER_THEME  = int(os.environ.get("STOCKS_PER_THEME",  "15").strip() or "15")
+TOP_N             = int(os.environ.get("REPORT_TOP_N",      "15").strip() or "15")
+# 株探の「今日の人気テーマ」も国策テーマに混ぜるか（1で有効）
+USE_TRENDING      = os.environ.get("USE_TRENDING", "0").strip() == "1"
 # ──────────────────────────────────────────────────
 
 
 def build_todays_report() -> tuple[list[dict], list[str]]:
-    """今日の注目テーマから、過熱していないスコア上位銘柄を返す。"""
+    """国策テーマから、過熱していないスコア上位銘柄を返す。"""
 
-    # ① 今日の人気テーマを取得
-    todays_themes = get_trending_themes(TOP_THEMES)
-    print(f"今日のテーマ（{len(todays_themes)}件）: {todays_themes}")
+    # ① 対象テーマ＝国策テーマ（必要なら今日の人気テーマも追加）
+    todays_themes = list(KOKUSAKU_THEMES)
+    if USE_TRENDING:
+        for t in get_trending_themes(6):
+            if t not in todays_themes:
+                todays_themes.append(t)
+    print(f"対象テーマ（{len(todays_themes)}件）: {todays_themes}")
 
     # ② 各テーマから銘柄を収集（重複除去）
     seen_codes, raw_stocks = set(), []
@@ -116,13 +139,13 @@ def render_html(rows: list[dict], todays_themes: list[str]) -> str:
         for t in todays_themes
     )
     theme_section = f"""
-      <h2 style="color:#ea580c;margin-top:0;">🔥 今日の注目テーマ</h2>
-      <p style="color:#64748b;font-size:12px;margin-top:-8px;">株探アクセスランキング（本日の人気順）</p>
+      <h2 style="color:#ea580c;margin-top:0;">🎯 国策テーマ（高市政権の重点分野）</h2>
+      <p style="color:#64748b;font-size:12px;margin-top:-8px;">核融合・レアアース・フィジカルAI・宇宙・創薬・半導体・量子 ほか</p>
       <div style="margin-bottom:16px;">{theme_badges}</div>"""
 
     if not rows:
         return f"""<div style="font-family:'Hiragino Kaku Gothic Pro','Yu Gothic',sans-serif;color:#1e293b;max-width:700px;">
-          <h2 style="color:#2563eb;">📈 本日の注目銘柄レポート（{today}）</h2>
+          <h2 style="color:#2563eb;">📈 本日の国策銘柄レポート（{today}）</h2>
           {theme_section}
           <p style="background:#f1f5f9;padding:12px;border-radius:8px;">
             本日は上記テーマ内に表示できる銘柄がありませんでした（データ取得エラーの可能性）。
@@ -133,9 +156,9 @@ def render_html(rows: list[dict], todays_themes: list[str]) -> str:
     # 🟢の件数を数えてタイトルを変える
     buy_count = sum(1 for r in rows if r.get("buy_label", "").startswith("🟢"))
     if buy_count > 0:
-        subtitle = f"🟢買い場候補 <b>{buy_count}銘柄</b>を含む注目 {len(rows)}銘柄"
+        subtitle = f"🟢買い場候補 <b>{buy_count}銘柄</b>を含む国策 {len(rows)}銘柄"
     else:
-        subtitle = f"今日の注目テーマから過熱を除いたスコア上位 {len(rows)}銘柄"
+        subtitle = f"国策テーマから過熱を除いたスコア上位 {len(rows)}銘柄"
 
     trs = []
     for i, r in enumerate(rows, 1):
@@ -170,7 +193,7 @@ def render_html(rows: list[dict], todays_themes: list[str]) -> str:
         </tr>""")
 
     return f"""<div style="font-family:'Hiragino Kaku Gothic Pro','Yu Gothic',sans-serif;color:#1e293b;max-width:720px;">
-      <h2 style="color:#2563eb;margin-bottom:4px;">📈 本日の注目銘柄レポート（{today}）</h2>
+      <h2 style="color:#2563eb;margin-bottom:4px;">📈 本日の国策銘柄レポート（{today}）</h2>
       <p style="color:#64748b;font-size:12px;margin-top:0;">{subtitle}</p>
       {theme_section}
       <table style="border-collapse:collapse;width:100%;font-size:13px;">
@@ -212,7 +235,7 @@ def send(html: str):
         return
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"📈 本日の注目銘柄レポート {datetime.now():%m/%d}"
+    msg["Subject"] = f"📈 本日の国策銘柄レポート {datetime.now():%m/%d}"
     msg["From"]    = addr
     msg["To"]      = to
     msg.attach(MIMEText(html, "html", "utf-8"))
