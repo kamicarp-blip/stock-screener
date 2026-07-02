@@ -1,11 +1,14 @@
-"""毎朝メール：高市政権の国策テーマ × スコア上位銘柄（過熱株を除く）
+"""毎朝メール：高市政権の国策テーマ × 仕込み候補（未来×割安）
 
 対象テーマ：核融合・レアアース・フィジカルAI・ロボット・宇宙・創薬・
 半導体・量子コンピューター など、高市政権の重点17分野ベースの国策テーマ。
 
-ロジック：
-  各国策テーマの銘柄を収集 → 財務スコア計算 → 🔴過熱を除外 →
-  🟢買い場を上位に、スコア順でメール送信。
+主役は「💎仕込み度」＝ 未来テーマなのに、まだ安い株 を検出する採点：
+  ・割安（PER/PBR/PSR/ネットキャッシュ）        …最大45点
+  ・財務の堅さ（自己資本比率）                  …最大15点
+  ・まだ安い位置（6ヶ月レンジの安値圏・低RSI）  …最大30点
+  ・成長のタネ（増収）                          …最大10点
+勢い（モメンタム）分析・買い時シグナルは補助情報として併載。
 """
 import os
 import ssl
@@ -40,6 +43,70 @@ TOP_N             = int(os.environ.get("REPORT_TOP_N",      "15").strip() or "15
 # 株探の「今日の人気テーマ」も国策テーマに混ぜるか（1で有効）
 USE_TRENDING      = os.environ.get("USE_TRENDING", "0").strip() == "1"
 # ──────────────────────────────────────────────────
+
+
+def shikomi_score(r: dict) -> tuple[int, list[str]]:
+    """💎仕込み度（0〜100）：未来テーマ×割安×まだ安値圏 を採点。
+
+    「良いテーマなのにまだ上がっていない株」ほど高得点。
+    すでに急騰した株（過熱）は減点して弾く。
+    """
+    pts, reasons = 0, []
+
+    # ── 割安（最大45点）──
+    per, pbr, psr = r.get("per"), r.get("pbr"), r.get("psr")
+    if per is not None:
+        if per <= 15:
+            pts += 15
+            reasons.append(f"PER{per:.1f}倍と割安")
+        elif per <= 20:
+            pts += 8
+    if pbr is not None:
+        if pbr <= 1.0:
+            pts += 15
+            reasons.append(f"PBR{pbr:.2f}倍（解散価値以下）")
+        elif pbr <= 1.5:
+            pts += 8
+    if psr is not None and psr <= 1.0:
+        pts += 10
+        reasons.append("PSR1倍以下（エミン基準）")
+    if r.get("net_cash_over_mcap"):
+        pts += 5
+        reasons.append("ネットキャッシュ＞時価総額（タダ株級）")
+
+    # ── 財務の堅さ（最大15点）──
+    eq = r.get("equity_ratio")
+    if eq is not None:
+        if eq >= 50:
+            pts += 15
+            reasons.append(f"自己資本比率{eq:.0f}%と堅い")
+        elif eq >= 40:
+            pts += 8
+
+    # ── まだ安い位置＝出遅れ（最大30点）──
+    pos = r.get("pos6m")
+    if pos is not None:
+        if pos <= 35:
+            pts += 20
+            reasons.append("直近6ヶ月の安値圏（出遅れ）")
+        elif pos <= 55:
+            pts += 10
+            reasons.append("6ヶ月レンジの中位以下")
+    rsi = r.get("rsi")
+    if rsi is not None and rsi <= 55:
+        pts += 10
+
+    # ── 成長のタネ（最大10点）──
+    rg = r.get("revenue_growth")
+    if rg is not None and rg >= 5:
+        pts += 10
+        reasons.append(f"増収{rg:.0f}%")
+
+    # すでに急騰した株は仕込み対象から外す
+    if r.get("signal") == "hot":
+        pts = max(0, pts - 40)
+
+    return min(100, pts), reasons[:4]
 
 
 def _theme_momentum(all_rows: list[dict]) -> list[dict]:
@@ -137,10 +204,14 @@ def build_todays_report():
                 "prev_change": bt["prev_change"],
                 "rsi":         bt["rsi"],
                 "dev25":       bt["dev25"],
+                "pos6m":       bt.get("pos6m"),
             })
         else:
             row["signal"] = None
             row["buy_label"] = "－"
+
+        # 💎仕込み度（未来×割安×出遅れ）
+        row["shikomi"], row["shikomi_reasons"] = shikomi_score(row)
         all_rows.append(row)
         time.sleep(0.15)
 
@@ -165,12 +236,20 @@ def build_todays_report():
               f"テーマ={t['theme']}")
         break
 
-    # ⑥ 銘柄一覧：過熱を除外、🟢を先に、スコア順、上位TOP_N
+    # ⑥ 💎仕込み候補：仕込み度の高い順 TOP5（過熱は除外・買い時取得済みのみ）
+    shikomi_list = [r for r in all_rows
+                    if r.get("signal") not in (None, "hot") and r["shikomi"] >= 45]
+    shikomi_list.sort(key=lambda x: (-x["shikomi"], -x["score"]))
+    shikomi_list = shikomi_list[:5]
+    for r in shikomi_list:
+        print(f"  💎 仕込み{r['shikomi']}点: {r['name']}（{r['code']}）{r['theme']}")
+
+    # ⑦ 銘柄一覧：過熱を除外、💎仕込み度順（同点はスコア順）、上位TOP_N
     table = [r for r in all_rows if r.get("signal") != "hot"]
-    table.sort(key=lambda x: (0 if x.get("signal") == "buy" else 1, -x["score"]))
+    table.sort(key=lambda x: (-x.get("shikomi", 0), -x["score"]))
     table = table[:TOP_N]
 
-    return table, todays_themes, theme_ranking, highlight
+    return table, todays_themes, theme_ranking, highlight, shikomi_list
 
 
 # ── HTML生成 ──────────────────────────────────────
@@ -189,6 +268,54 @@ def _chg_color(v):
     if v is None:
         return "#64748b"
     return "#16a34a" if v > 0 else "#dc2626" if v < 0 else "#64748b"
+
+
+def _render_shikomi(shikomi_list: list[dict]) -> str:
+    """💎 未来×割安 仕込み候補（メール最上部の主役セクション）"""
+    if not shikomi_list:
+        return """
+      <div style="background:#faf5ff;border:2px solid #9333ea;border-radius:12px;padding:14px 16px;margin-bottom:18px;">
+        <div style="font-size:13px;color:#9333ea;font-weight:bold;">💎 未来×割安の仕込み候補</div>
+        <div style="font-size:13px;color:#64748b;margin-top:4px;">
+          本日は仕込み度45点以上の銘柄がありませんでした。国策テーマ全体が高値圏の可能性があります。無理に買わず待つのも投資のうち。
+        </div>
+      </div>"""
+
+    top = shikomi_list[0]
+    top_link = f"https://kabutan.jp/stock/?code={top['code']}"
+    top_reasons = "／".join(top.get("shikomi_reasons", []))
+
+    others = []
+    for r in shikomi_list[1:]:
+        link = f"https://kabutan.jp/stock/?code={r['code']}"
+        rsn = "／".join(r.get("shikomi_reasons", [])[:2])
+        others.append(f"""
+        <tr style="border-bottom:1px solid #e9d5ff;">
+          <td style="padding:6px 8px;font-weight:bold;color:#9333ea;white-space:nowrap;">💎{r['shikomi']}点</td>
+          <td style="padding:6px 8px;"><a href="{link}" style="color:#2563eb;text-decoration:none;font-weight:bold;">{r['name']}</a>
+            <span style="font-size:11px;color:#64748b;">{r['code']}・{r.get('theme','')}</span></td>
+          <td style="padding:6px 8px;font-size:11px;color:#64748b;">{rsn}</td>
+          <td style="padding:6px 8px;text-align:center;font-size:12px;white-space:nowrap;">{r.get('buy_label','')}</td>
+        </tr>""")
+    others_html = (
+        f'<table style="border-collapse:collapse;width:100%;font-size:13px;margin-top:10px;">'
+        f'<tbody>{"".join(others)}</tbody></table>'
+    ) if others else ""
+
+    return f"""
+      <div style="background:#faf5ff;border:2px solid #9333ea;border-radius:12px;padding:14px 16px;margin-bottom:18px;">
+        <div style="font-size:13px;color:#9333ea;font-weight:bold;margin-bottom:6px;">
+          💎 未来×割安の仕込み候補（国策テーマなのに、まだ安い株）
+        </div>
+        <div style="font-size:17px;font-weight:bold;">
+          <a href="{top_link}" style="color:#2563eb;text-decoration:none;">{top['name']}（{top['code']}）</a>
+          <span style="color:#9333ea;">仕込み度 {top['shikomi']}点</span>
+          <span style="font-size:12px;color:#64748b;">{top.get('theme','')}／財務スコア{top['score']}点 {top['stars']}</span>
+        </div>
+        <div style="font-size:12px;color:#7c3aed;margin-top:4px;">{top_reasons}</div>
+        <div style="font-size:12px;color:#16a34a;margin-top:2px;">{top.get('buy_label','')}　{top.get('buy_reason','')}</div>
+        {others_html}
+      </div>"""
 
 
 def _render_highlight(highlight: dict) -> str:
@@ -240,7 +367,8 @@ def _render_theme_ranking(theme_ranking: list[dict]) -> str:
       </table>"""
 
 
-def render_html(rows, todays_themes, theme_ranking=None, highlight=None) -> str:
+def render_html(rows, todays_themes, theme_ranking=None, highlight=None,
+                shikomi_list=None) -> str:
     today = datetime.now().strftime("%Y/%m/%d (%a)")
 
     theme_badges = "".join(
@@ -263,12 +391,16 @@ def render_html(rows, todays_themes, theme_ranking=None, highlight=None) -> str:
           <p style="color:#94a3b8;font-size:11px;">※ 自動生成。投資助言ではありません。</p>
         </div>"""
 
-    # 🟢の件数を数えてタイトルを変える
+    # 💎と🟢の件数でサブタイトルを組み立て
     buy_count = sum(1 for r in rows if r.get("buy_label", "").startswith("🟢"))
-    if buy_count > 0:
-        subtitle = f"🟢買い場候補 <b>{buy_count}銘柄</b>を含む国策 {len(rows)}銘柄"
-    else:
-        subtitle = f"国策テーマから過熱を除いたスコア上位 {len(rows)}銘柄"
+    dia_count = len(shikomi_list or [])
+    parts = []
+    if dia_count:
+        parts.append(f"💎仕込み候補 <b>{dia_count}銘柄</b>")
+    if buy_count:
+        parts.append(f"🟢買い場 <b>{buy_count}銘柄</b>")
+    subtitle = ("・".join(parts) + f"／国策テーマから過熱を除いた {len(rows)}銘柄（仕込み度順）"
+                if parts else f"国策テーマから過熱を除いた {len(rows)}銘柄（仕込み度順）")
 
     trs = []
     for i, r in enumerate(rows, 1):
@@ -283,11 +415,15 @@ def render_html(rows, todays_themes, theme_ranking=None, highlight=None) -> str:
         else:
             lbl_bg = "#f1f5f9"
 
+        shk = r.get("shikomi", 0)
+        shk_color = "#9333ea" if shk >= 60 else "#64748b"
+
         trs.append(f"""
         <tr style="border-bottom:1px solid #e2e8f0;">
           <td style="padding:8px 6px;text-align:center;color:#64748b;font-size:12px;">{i}</td>
           <td style="padding:8px 6px;text-align:center;">
-            <span style="font-weight:bold;color:{_score_color(r['score'])};">{r['score']}点</span><br>
+            <span style="font-weight:bold;color:{shk_color};">💎{shk}点</span><br>
+            <span style="font-size:11px;color:{_score_color(r['score'])};">財務{r['score']}点</span><br>
             <span style="font-size:11px;color:#f59e0b;">{r['stars']}</span>
           </td>
           <td style="padding:6px 8px;text-align:center;background:{lbl_bg};border-radius:6px;font-size:12px;white-space:nowrap;">{lbl}</td>
@@ -305,15 +441,16 @@ def render_html(rows, todays_themes, theme_ranking=None, highlight=None) -> str:
     return f"""<div style="font-family:'Hiragino Kaku Gothic Pro','Yu Gothic',sans-serif;color:#1e293b;max-width:720px;">
       <h2 style="color:#2563eb;margin-bottom:4px;">📈 本日の国策銘柄レポート（{today}）</h2>
       <p style="color:#64748b;font-size:12px;margin-top:0;">{subtitle}</p>
+      {_render_shikomi(shikomi_list or [])}
       {_render_highlight(highlight)}
       {_render_theme_ranking(theme_ranking or [])}
       {theme_section}
-      <h3 style="color:#16a34a;margin-bottom:6px;">📋 国策銘柄リスト（過熱を除くスコア順）</h3>
+      <h3 style="color:#16a34a;margin-bottom:6px;">📋 国策銘柄リスト（💎仕込み度順・過熱除外）</h3>
       <table style="border-collapse:collapse;width:100%;font-size:13px;">
         <thead>
           <tr style="background:#f1f5f9;font-size:12px;">
             <th style="padding:6px;">#</th>
-            <th style="padding:6px;">スコア</th>
+            <th style="padding:6px;">💎仕込み度</th>
             <th style="padding:6px;">買い時</th>
             <th style="padding:6px;text-align:left;">銘柄 ／ テーマ</th>
             <th style="padding:6px;">前日比</th>
@@ -325,10 +462,13 @@ def render_html(rows, todays_themes, theme_ranking=None, highlight=None) -> str:
         <tbody>{''.join(trs)}</tbody>
       </table>
       <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 14px;margin-top:14px;font-size:12px;">
+        <b>💎仕込み度とは：</b>「国策テーマなのに、まだ安い株」の度合い（100点満点）。<br>
+        割安（PER15倍以下・PBR1倍以下・PSR1倍以下・ネットキャッシュ）＋財務の堅さ＋
+        <b>6ヶ月レンジの安値圏にいる（出遅れ）</b>＋増収、で採点。60点以上が有力候補。<br><br>
         <b>買い時シグナルの見方：</b><br>
         🟢 買い場 ＝ 上昇トレンド（株価＞75日線）＋ 押し目 or ゴールデンクロス or RSI健全<br>
-        ⬜ 中立 ＝ 条件は揃っていないが過熱でもない（自分で判断）<br>
-        🔴 過熱 ＝ このメールでは除外（RSI75超 or 25日線から15%以上上昇）
+        ⬜ 中立 ＝ 条件は揃っていないが過熱でもない（仕込みは中立のうちが基本）<br>
+        🔴 過熱 ＝ このメールでは除外（すでに上がりきった株は仕込み対象外）
       </div>
       <p style="color:#94a3b8;font-size:11px;margin-top:12px;">※ 自動生成。投資助言ではありません。最終判断はご自身で。</p>
     </div>"""
@@ -361,6 +501,6 @@ def send(html: str):
 
 
 if __name__ == "__main__":
-    rows, themes, ranking, highlight = build_todays_report()
-    print(f"送信銘柄: {len(rows)} 件")
-    send(render_html(rows, themes, ranking, highlight))
+    rows, themes, ranking, highlight, shikomi_list = build_todays_report()
+    print(f"送信銘柄: {len(rows)} 件（💎仕込み候補 {len(shikomi_list)} 件）")
+    send(render_html(rows, themes, ranking, highlight, shikomi_list))

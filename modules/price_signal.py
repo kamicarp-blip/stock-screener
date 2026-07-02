@@ -33,6 +33,10 @@ def buy_timing(code: str) -> dict | None:
         dev25 = (c - m25) / m25 * 100  # 25日線からの乖離率(%)
         prev_change = (c - float(close.iloc[-2])) / float(close.iloc[-2]) * 100
 
+        # 直近6ヶ月レンジ内の株価位置（0=安値圏、100=高値圏）
+        lo6, hi6 = float(close.min()), float(close.max())
+        pos6m = (c - lo6) / (hi6 - lo6) * 100 if hi6 > lo6 else 50.0
+
         # 直近5営業日でゴールデンクロス（5日線が25日線を上抜け）したか
         gc = bool(
             (ma5.iloc[-1] > ma25.iloc[-1])
@@ -72,6 +76,7 @@ def buy_timing(code: str) -> dict | None:
             "rsi": round(rsi, 1),
             "dev25": round(dev25, 1),
             "prev_change": round(prev_change, 2),
+            "pos6m": round(pos6m, 1),
         }
     except Exception:
         return None
