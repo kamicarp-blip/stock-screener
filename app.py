@@ -8,6 +8,7 @@ from modules.theme_search import (
 from modules.financial_data import get_financial_data, apply_filters, score_stock
 from modules.price_signal import buy_timing
 from modules.news_fetcher import get_stock_news
+from modules import portfolio
 
 st.set_page_config(
     page_title="株テーマスクリーナー",
@@ -248,6 +249,10 @@ with st.sidebar:
     )
     search_btn = st.button("🔍 調べる", use_container_width=True)
 
+    st.divider()
+    st.subheader("💼 保有銘柄")
+    holdings_btn = st.button("💼 保有銘柄をチェック", use_container_width=True)
+
 # プリセットの根拠を本文上部に表示
 note = PRESET_NOTES.get(st.session_state["preset_sel"])
 if note:
@@ -261,8 +266,73 @@ run = run_btn or trigger
 search_run = search_btn
 
 # ──────────────────────────────────────────
-# MAIN
+# MAIN（保有銘柄チェックは最優先で処理）
 # ──────────────────────────────────────────
+if holdings_btn:
+    st.title("💼 保有銘柄の健康診断")
+
+    holdings = portfolio.load_holdings()
+    if not holdings:
+        st.info(
+            "保有銘柄がまだ登録されていません。リポジトリ直下の **holdings.json** に "
+            "銘柄コードを追加してください。\n\n"
+            '例：`{"holdings": [{"code": "7203", "buy_price": 2000, "shares": 100}]}`\n\n'
+            "`buy_price`（取得単価）と `shares`（株数）は任意です（null可）。"
+        )
+        st.stop()
+
+    with st.spinner(f"保有銘柄 {len(holdings)} 件を分析中..."):
+        hrows = portfolio.analyze_portfolio(holdings)
+
+    if not hrows:
+        st.error("保有銘柄のデータ取得に失敗しました。時間をおいて再試行してください。")
+        st.stop()
+
+    st.success(f"✅ 保有銘柄 **{len(hrows)} 件** の健康診断が完了しました")
+
+    display_rows = []
+    for r in hrows:
+        display_rows.append({
+            "銘柄名": r.get("name"),
+            "コード": r.get("code"),
+            "現在値": r.get("current_price"),
+            "前日比%": r.get("prev_change"),
+            "損益%": r.get("pl_pct"),
+            "シグナル": r.get("label"),
+            "配当利回り%": r.get("dividend_yield"),
+            "次回決算日": r.get("earnings_date"),
+        })
+    hdf = pd.DataFrame(display_rows)
+
+    st.dataframe(
+        hdf,
+        column_config={
+            "現在値": st.column_config.NumberColumn("現在値（円）", format="%.0f"),
+            "前日比%": st.column_config.NumberColumn("前日比（%）", format="%.2f"),
+            "損益%": st.column_config.NumberColumn("損益（%）", format="%.2f"),
+            "配当利回り%": st.column_config.NumberColumn("配当利回り（%）", format="%.2f"),
+        },
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.divider()
+    st.subheader("📰 各銘柄の最新ニュース")
+    for r in hrows:
+        with st.expander(f"📌 {r.get('name')}（{r.get('code')}）"):
+            news = get_stock_news(r.get("name", ""), r.get("code", ""))
+            if news:
+                for n in news:
+                    st.markdown(f"- [{n['title']}]({n['link']})")
+            else:
+                st.caption("ニュースが見つかりませんでした")
+
+    st.caption(
+        "保有銘柄の追加・変更は holdings.json を編集（毎朝メールに反映するには "
+        "GitHub 上の holdings.json を編集してください）"
+    )
+    st.stop()
+
 if not run and not search_run:
     st.info("👈 左サイドバーから検索できます。テーマ・業種で絞り込む場合は「スクリーニング実行」、特定の銘柄を調べる場合は下の「調べる」ボタンを使ってください")
     with st.expander("💡 使い方"):

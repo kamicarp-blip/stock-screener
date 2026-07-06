@@ -80,3 +80,77 @@ def buy_timing(code: str) -> dict | None:
         }
     except Exception:
         return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def holding_signal(code: str) -> dict | None:
+    """長期保有者向け：すでに持っている株を『どうするか』の行動シグナル。
+
+    戻り値: {action, label, reasons, price, prev_change, rsi, dev25, pos6m}
+    action: plunge / take_profit / trend_warning / buy_more / hold
+    """
+    try:
+        hist = yf.Ticker(f"{code}.T").history(period="6mo")
+        if hist is None or len(hist) < 80:
+            return None
+        close = hist["Close"]
+        c = float(close.iloc[-1])
+        ma5 = close.rolling(5).mean()
+        ma25 = close.rolling(25).mean()
+        ma75 = close.rolling(75).mean()
+        m25, m75 = float(ma25.iloc[-1]), float(ma75.iloc[-1])
+
+        rsi_series = _rsi(close)
+        rsi = float(rsi_series.iloc[-1])
+        dev25 = (c - m25) / m25 * 100
+        prev_change = (c - float(close.iloc[-2])) / float(close.iloc[-2]) * 100
+
+        lo6, hi6 = float(close.min()), float(close.max())
+        pos6m = (c - lo6) / (hi6 - lo6) * 100 if hi6 > lo6 else 50.0
+
+        gc = bool(
+            (ma5.iloc[-1] > ma25.iloc[-1])
+            and (ma5.iloc[-6] <= ma25.iloc[-6])
+        )
+
+        uptrend = c > m75
+        reasons = []
+
+        if prev_change <= -5:
+            action, label = "plunge", "📉 急落・要確認"
+            reasons.append(f"前日比{prev_change:+.1f}%と急落")
+        elif rsi >= 75 or dev25 >= 15:
+            action, label = "take_profit", "🔴 過熱・利益確定検討"
+            if rsi >= 75:
+                reasons.append(f"RSI {rsi:.0f}（買われすぎ）")
+            if dev25 >= 15:
+                reasons.append(f"25日線から+{dev25:.0f}%乖離")
+            reasons.append("長期保有でも一部利益確定を検討する局面")
+        elif not uptrend:
+            action, label = "trend_warning", "⚠️ トレンド注意（75日線割れ）"
+            reasons.append("株価が75日線を下回っている（トレンド弱い）")
+        elif uptrend and (gc or abs(dev25) <= 4 or 30 <= rsi <= 55) and pos6m <= 60:
+            action, label = "buy_more", "💰 買い増しチャンス"
+            if gc:
+                reasons.append("ゴールデンクロス発生")
+            if abs(dev25) <= 4:
+                reasons.append("25日線まで押し目")
+            if 30 <= rsi <= 55:
+                reasons.append(f"RSI {rsi:.0f}（過熱せず）")
+            reasons.append("上昇トレンド(株価>75日線)")
+        else:
+            action, label = "hold", "🤝 ホールド（静観）"
+            reasons.append(f"RSI {rsi:.0f}・25日線乖離{dev25:+.1f}%")
+
+        return {
+            "action": action,
+            "label": label,
+            "reasons": "・".join(reasons),
+            "price": round(c, 1),
+            "prev_change": round(prev_change, 2),
+            "rsi": round(rsi, 1),
+            "dev25": round(dev25, 1),
+            "pos6m": round(pos6m, 1),
+        }
+    except Exception:
+        return None

@@ -1,0 +1,6 @@
+{
+  "_使い方": "保有銘柄を下のholdingsに追加。code=4桁の銘柄コード（必須）、buy_price=平均取得単価・円（任意、nullでもOK）、shares=株数（任意）。nameは自動取得されるので省略可",
+  "holdings": [
+    {"code": "8088", "buy_price": null, "shares": null}
+  ]
+}

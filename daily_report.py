@@ -28,6 +28,8 @@ except Exception:
 from modules.theme_search import get_trending_themes, get_theme_stocks_by_name
 from modules.financial_data import get_financial_data, score_stock
 from modules.price_signal import buy_timing
+from modules import portfolio
+from modules.news_fetcher import get_stock_news
 
 # ── 国策テーマ（高市政権の重点分野ベース。株探で銘柄が返る正式名）──
 KOKUSAKU_THEMES = [
@@ -175,14 +177,28 @@ def build_todays_report():
                 todays_themes.append(t)
     print(f"対象テーマ（{len(todays_themes)}件）: {todays_themes}")
 
-    # ② 各テーマから銘柄を収集（重複除去）
-    seen_codes, raw_stocks = set(), []
-    for theme in todays_themes:
-        for s in get_theme_stocks_by_name(theme)[:STOCKS_PER_THEME]:
-            if s["code"] not in seen_codes:
-                seen_codes.add(s["code"])
-                raw_stocks.append({**s, "theme": theme})
-    print(f"銘柄収集: {len(raw_stocks)} 社")
+    # ② 各テーマから銘柄を収集（重複除去）。
+    #    株探スクレイピングが失敗すると銘柄ゼロの空メールになりかねないため、
+    #    テーマ間にウェイトを入れつつ、収集数が少なければ再試行する。
+    MIN_STOCKS = 20
+    MAX_ATTEMPTS = 3
+    raw_stocks = []
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        seen_codes, raw_stocks = set(), []
+        for theme in todays_themes:
+            for s in get_theme_stocks_by_name(theme)[:STOCKS_PER_THEME]:
+                if s["code"] not in seen_codes:
+                    seen_codes.add(s["code"])
+                    raw_stocks.append({**s, "theme": theme})
+            time.sleep(0.7)
+        print(f"銘柄収集（{attempt}回目）: {len(raw_stocks)} 社")
+
+        if len(raw_stocks) >= MIN_STOCKS:
+            break
+        if attempt < MAX_ATTEMPTS:
+            print(f"収集数が{MIN_STOCKS}社未満のため60秒待って再収集します...")
+            time.sleep(60)
+    print(f"銘柄収集（確定）: {len(raw_stocks)} 社")
 
     # ③ 財務データ＋スコア＋買い時シグナルを全銘柄で取得
     all_rows = []
@@ -252,6 +268,21 @@ def build_todays_report():
     return table, todays_themes, theme_ranking, highlight, shikomi_list
 
 
+def build_holdings_report() -> list[dict]:
+    """holdings.json の保有銘柄を分析し、ニュースも付与して返す。"""
+    holdings = portfolio.load_holdings()
+    if not holdings:
+        return []
+
+    rows = portfolio.analyze_portfolio(holdings)
+    for r in rows:
+        try:
+            r["news"] = get_stock_news(r.get("name", ""), r.get("code", ""), max_items=2)
+        except Exception:
+            r["news"] = []
+    return rows
+
+
 # ── HTML生成 ──────────────────────────────────────
 
 def _fmt(v, suffix="", nd=1):
@@ -268,6 +299,96 @@ def _chg_color(v):
     if v is None:
         return "#64748b"
     return "#16a34a" if v > 0 else "#dc2626" if v < 0 else "#64748b"
+
+
+_ACTION_BG = {
+    "plunge": "#fee2e2",
+    "take_profit": "#fee2e2",
+    "trend_warning": "#fef9c3",
+    "buy_more": "#dcfce7",
+    "hold": "#f1f5f9",
+}
+
+
+def _render_holdings(hrows: list[dict]) -> str:
+    """📁 保有銘柄の健康診断セクション（メール最上部）。
+
+    holdings.jsonが空（未登録）のときはセクションごと非表示にする。
+    """
+    if not hrows:
+        return ""
+
+    cards = []
+    for r in hrows:
+        code = r.get("code", "")
+        name = r.get("name", "")
+        link = f"https://kabutan.jp/stock/?code={code}"
+        price = r.get("current_price")
+        pc = r.get("prev_change")
+
+        action = r.get("action")
+        bg = _ACTION_BG.get(action, "#f1f5f9")
+        label = r.get("label", "－")
+        reasons = r.get("reasons", "")
+
+        pl_pct = r.get("pl_pct")
+        pl_html = ""
+        if pl_pct is not None:
+            pl_color = "#16a34a" if pl_pct >= 0 else "#dc2626"
+            pl_amount = r.get("pl_amount")
+            amount_html = f"（{pl_amount:+,}円）" if pl_amount is not None else ""
+            pl_html = (
+                f'<div style="font-size:18px;font-weight:bold;color:{pl_color};margin-top:2px;">'
+                f'損益 {pl_pct:+.1f}%{amount_html}</div>'
+            )
+
+        div_yield = r.get("dividend_yield")
+        div_html = ""
+        if div_yield is not None:
+            div_html = (
+                f'<span style="font-size:12px;color:#64748b;margin-left:8px;">'
+                f'配当利回り {div_yield:.2f}%</span>'
+            )
+
+        earnings_html = ""
+        if r.get("earnings_soon") and r.get("earnings_date"):
+            ed = r["earnings_date"]
+            try:
+                ed_label = f"{ed.month}月{ed.day}日"
+            except Exception:
+                ed_label = str(ed)
+            earnings_html = (
+                f'<span style="display:inline-block;margin-top:6px;padding:2px 8px;'
+                f'background:#fef3c7;color:#92400e;border-radius:10px;font-size:11px;">'
+                f'⚠️ 決算発表接近（{ed_label}）</span>'
+            )
+
+        news_items = r.get("news") or []
+        news_html = ""
+        if news_items:
+            links = "".join(
+                f'<div style="margin-top:2px;"><a href="{n["link"]}" '
+                f'style="font-size:11px;color:#2563eb;text-decoration:none;">・{n["title"]}</a></div>'
+                for n in news_items
+            )
+            news_html = f'<div style="margin-top:6px;">{links}</div>'
+
+        cards.append(f"""
+        <div style="background:{bg};border-radius:10px;padding:10px 14px;margin-bottom:10px;">
+          <div style="font-size:15px;font-weight:bold;">
+            <a href="{link}" style="color:#2563eb;text-decoration:none;">{name}（{code}）</a>
+            <span style="font-size:13px;color:{_chg_color(pc)};margin-left:8px;">{_fmt(price,'円',0) if price is not None else '－'}　前日比{_fmt(pc,'%',2)}</span>
+          </div>
+          {pl_html}
+          <div style="font-size:13px;margin-top:4px;">{label}　<span style="font-size:12px;color:#64748b;">{reasons}</span></div>
+          <div style="margin-top:2px;">{div_html}</div>
+          {earnings_html}
+          {news_html}
+        </div>""")
+
+    return f"""
+      <h2 style="color:#9333ea;margin-top:0;">📁 保有銘柄の健康診断</h2>
+      {''.join(cards)}"""
 
 
 def _render_shikomi(shikomi_list: list[dict]) -> str:
@@ -368,7 +489,7 @@ def _render_theme_ranking(theme_ranking: list[dict]) -> str:
 
 
 def render_html(rows, todays_themes, theme_ranking=None, highlight=None,
-                shikomi_list=None) -> str:
+                shikomi_list=None, holdings_html="") -> str:
     today = datetime.now().strftime("%Y/%m/%d (%a)")
 
     theme_badges = "".join(
@@ -384,6 +505,7 @@ def render_html(rows, todays_themes, theme_ranking=None, highlight=None,
     if not rows:
         return f"""<div style="font-family:'Hiragino Kaku Gothic Pro','Yu Gothic',sans-serif;color:#1e293b;max-width:700px;">
           <h2 style="color:#2563eb;">📈 本日の国策銘柄レポート（{today}）</h2>
+          {holdings_html}
           {theme_section}
           <p style="background:#f1f5f9;padding:12px;border-radius:8px;">
             本日は上記テーマ内に表示できる銘柄がありませんでした（データ取得エラーの可能性）。
@@ -441,6 +563,7 @@ def render_html(rows, todays_themes, theme_ranking=None, highlight=None,
     return f"""<div style="font-family:'Hiragino Kaku Gothic Pro','Yu Gothic',sans-serif;color:#1e293b;max-width:720px;">
       <h2 style="color:#2563eb;margin-bottom:4px;">📈 本日の国策銘柄レポート（{today}）</h2>
       <p style="color:#64748b;font-size:12px;margin-top:0;">{subtitle}</p>
+      {holdings_html}
       {_render_shikomi(shikomi_list or [])}
       {_render_highlight(highlight)}
       {_render_theme_ranking(theme_ranking or [])}
@@ -501,6 +624,14 @@ def send(html: str):
 
 
 if __name__ == "__main__":
+    holdings_html = ""
+    try:
+        hrows = build_holdings_report()
+        print(f"保有銘柄: {len(hrows)} 件")
+        holdings_html = _render_holdings(hrows)
+    except Exception as e:
+        print(f"保有銘柄レポートの構築に失敗しました（テーマレポートは続行します）: {e}")
+
     rows, themes, ranking, highlight, shikomi_list = build_todays_report()
     print(f"送信銘柄: {len(rows)} 件（💎仕込み候補 {len(shikomi_list)} 件）")
-    send(render_html(rows, themes, ranking, highlight, shikomi_list))
+    send(render_html(rows, themes, ranking, highlight, shikomi_list, holdings_html))
