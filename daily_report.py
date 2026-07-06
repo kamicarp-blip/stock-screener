@@ -17,7 +17,14 @@ import time
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+# GitHub Actions は UTC で動くため、日付・曜日判定は必ず日本時間で行う
+JST = timezone(timedelta(hours=9), "JST")
+
+
+def now_jst() -> datetime:
+    return datetime.now(JST)
 
 # Windowsコンソール(cp932)でも絵文字ログが出せるようUTF-8に
 try:
@@ -44,6 +51,8 @@ STOCKS_PER_THEME  = int(os.environ.get("STOCKS_PER_THEME",  "15").strip() or "15
 TOP_N             = int(os.environ.get("REPORT_TOP_N",      "15").strip() or "15")
 # 株探の「今日の人気テーマ」も国策テーマに混ぜるか（1で有効）
 USE_TRENDING      = os.environ.get("USE_TRENDING", "0").strip() == "1"
+# 週間サマリーを強制する（テスト用。通常は土曜朝に自動で週間モード）
+FORCE_WEEKLY      = os.environ.get("FORCE_WEEKLY", "0").strip() == "1"
 # ──────────────────────────────────────────────────
 
 
@@ -133,7 +142,9 @@ def _theme_momentum(all_rows: list[dict]) -> list[dict]:
         buy_n = sum(1 for r in rs if r["signal"] == "buy")
         hot_n = sum(1 for r in rs if r["signal"] == "hot")
         avg_change = sum(r.get("prev_change", 0) or 0 for r in rs) / n
+        avg_week = sum(r.get("week_change", 0) or 0 for r in rs) / n
         avg_score = sum(r["score"] for r in rs) / n
+        avg_shikomi = sum(r.get("shikomi", 0) for r in rs) / n
         buy_ratio = buy_n / n
         hot_ratio = hot_n / n
 
@@ -156,12 +167,73 @@ def _theme_momentum(all_rows: list[dict]) -> list[dict]:
         stats.append({
             "theme": theme, "n": n, "buy_n": buy_n, "hot_n": hot_n,
             "buy_ratio": buy_ratio, "hot_ratio": hot_ratio,
-            "avg_change": avg_change, "avg_score": avg_score,
+            "avg_change": avg_change, "avg_week": avg_week,
+            "avg_score": avg_score, "avg_shikomi": avg_shikomi,
             "momentum": momentum, "status": status,
         })
 
     stats.sort(key=lambda x: x["momentum"], reverse=True)
     return stats
+
+
+def recommend_next_week(theme_stats: list[dict], all_rows: list[dict]) -> list[dict]:
+    """🔮 次週のおすすめ国策テーマ TOP3（週間サマリー用）。
+
+    長期・仕込み派向けの基準：
+      おすすめ度 = 平均仕込み度×0.5（割安×出遅れの余地が主役）
+                 ＋ 🟢買い場比率×30（動き始めの兆し）
+                 − 🔴過熱比率×30（もう遅いテーマは下げる）
+                 ± 週間騰落ボーナス（0〜+5%=底打ちの動き出し+10、
+                    +8%超=急騰済み-10、-5%超の下落=下げ止まり待ち-5）
+    「安いのに、静かに動き始めたテーマ」が1位に来る設計。
+    """
+    recs = []
+    for t in theme_stats:
+        aw = t.get("avg_week", 0)
+        if 0 <= aw <= 5:
+            week_bonus = 10
+        elif -2 <= aw < 0:
+            week_bonus = 5
+        elif aw > 8:
+            week_bonus = -10
+        elif aw < -5:
+            week_bonus = -5
+        else:
+            week_bonus = 0
+
+        rec_score = (t.get("avg_shikomi", 0) * 0.5
+                     + t["buy_ratio"] * 30
+                     - t["hot_ratio"] * 30
+                     + week_bonus)
+
+        # 理由文（ユーザーが読んで納得できる言葉で）
+        reasons = []
+        if t.get("avg_shikomi", 0) >= 50:
+            reasons.append(f"平均仕込み度{t['avg_shikomi']:.0f}点＝割安・出遅れの余地が大きい")
+        if t["buy_ratio"] >= 0.3:
+            reasons.append(f"🟢買い場が{t['buy_n']}/{t['n']}社と動き始めの兆し")
+        if 0 <= aw <= 5:
+            reasons.append(f"週間{aw:+.1f}%と急騰前の水準")
+        elif aw > 8:
+            reasons.append(f"週間{aw:+.1f}%と急騰済み・押し目待ち")
+        elif aw < -5:
+            reasons.append(f"週間{aw:+.1f}%と調整中・下げ止まり確認を")
+        if t["hot_ratio"] >= 0.3:
+            reasons.append("過熱銘柄が多め")
+        if not reasons:
+            reasons.append(f"平均仕込み度{t.get('avg_shikomi', 0):.0f}点・週間{aw:+.1f}%")
+
+        # テーマ内の代表仕込み銘柄（過熱を除く仕込み度トップ）
+        cands = [r for r in all_rows
+                 if r.get("theme") == t["theme"] and r.get("signal") not in (None, "hot")]
+        cands.sort(key=lambda x: (-x.get("shikomi", 0), -x["score"]))
+        best = cands[0] if cands else None
+
+        recs.append({**t, "rec_score": rec_score,
+                     "rec_reasons": "／".join(reasons[:3]), "best_stock": best})
+
+    recs.sort(key=lambda x: x["rec_score"], reverse=True)
+    return recs[:3]
 
 
 def build_todays_report():
@@ -265,7 +337,10 @@ def build_todays_report():
     table.sort(key=lambda x: (-x.get("shikomi", 0), -x["score"]))
     table = table[:TOP_N]
 
-    return table, todays_themes, theme_ranking, highlight, shikomi_list
+    # ⑧ 🔮 次週のおすすめテーマ（週間サマリー用）
+    weekly_recs = recommend_next_week(theme_ranking, all_rows)
+
+    return table, todays_themes, theme_ranking, highlight, shikomi_list, weekly_recs
 
 
 def build_holdings_report() -> list[dict]:
@@ -350,6 +425,35 @@ def _render_holdings(hrows: list[dict]) -> str:
                 f'配当利回り {div_yield:.2f}%</span>'
             )
 
+        # 🎯 目標株価の状態
+        target_html = ""
+        tstat = r.get("target_status")
+        tb, ts = r.get("target_buy"), r.get("target_sell")
+        if tstat == "hit_buy":
+            target_html = (f'<div style="background:#dcfce7;border:2px solid #16a34a;border-radius:8px;'
+                           f'padding:6px 10px;margin-top:6px;font-size:13px;font-weight:bold;color:#166534;">'
+                           f'🎯 目標買値 {tb:,.0f}円 に到達！買い増し検討のタイミングです</div>')
+        elif tstat == "hit_sell":
+            target_html = (f'<div style="background:#fee2e2;border:2px solid #dc2626;border-radius:8px;'
+                           f'padding:6px 10px;margin-top:6px;font-size:13px;font-weight:bold;color:#991b1b;">'
+                           f'🎯 目標売値 {ts:,.0f}円 に到達！利益確定検討のタイミングです</div>')
+        elif tstat == "near_buy" and price:
+            pct_left = (float(price) - float(tb)) / float(tb) * 100
+            target_html = (f'<div style="font-size:12px;color:#16a34a;margin-top:4px;">'
+                           f'🎯 目標買値 {tb:,.0f}円 まであと{pct_left:.1f}%</div>')
+        elif tstat == "near_sell" and price:
+            pct_left = (float(ts) - float(price)) / float(ts) * 100
+            target_html = (f'<div style="font-size:12px;color:#dc2626;margin-top:4px;">'
+                           f'🎯 目標売値 {ts:,.0f}円 まであと{pct_left:.1f}%</div>')
+        elif tb or ts:
+            parts = []
+            if tb:
+                parts.append(f"買い{tb:,.0f}円")
+            if ts:
+                parts.append(f"売り{ts:,.0f}円")
+            target_html = (f'<div style="font-size:11px;color:#94a3b8;margin-top:4px;">'
+                           f'🎯 目標株価：{"／".join(parts)}</div>')
+
         earnings_html = ""
         if r.get("earnings_soon") and r.get("earnings_date"):
             ed = r["earnings_date"]
@@ -378,9 +482,11 @@ def _render_holdings(hrows: list[dict]) -> str:
           <div style="font-size:15px;font-weight:bold;">
             <a href="{link}" style="color:#2563eb;text-decoration:none;">{name}（{code}）</a>
             <span style="font-size:13px;color:{_chg_color(pc)};margin-left:8px;">{_fmt(price,'円',0) if price is not None else '－'}　前日比{_fmt(pc,'%',2)}</span>
+            <span style="font-size:12px;color:{_chg_color(r.get('week_change'))};margin-left:6px;">週間{_fmt(r.get('week_change'),'%',1)}</span>
           </div>
           {pl_html}
           <div style="font-size:13px;margin-top:4px;">{label}　<span style="font-size:12px;color:#64748b;">{reasons}</span></div>
+          {target_html}
           <div style="margin-top:2px;">{div_html}</div>
           {earnings_html}
           {news_html}
@@ -488,9 +594,51 @@ def _render_theme_ranking(theme_ranking: list[dict]) -> str:
       </table>"""
 
 
+def _render_weekly(weekly_recs: list[dict]) -> str:
+    """🔮 次週の狙い目国策テーマ TOP3（土曜の週間サマリー限定）"""
+    if not weekly_recs:
+        return ""
+    cards = []
+    medals = ["🥇", "🥈", "🥉"]
+    for i, t in enumerate(weekly_recs):
+        best = t.get("best_stock")
+        best_html = ""
+        if best:
+            blink = f"https://kabutan.jp/stock/?code={best['code']}"
+            best_html = (
+                f'<div style="font-size:12px;margin-top:4px;">代表仕込み銘柄：'
+                f'<a href="{blink}" style="color:#2563eb;text-decoration:none;font-weight:bold;">'
+                f'{best["name"]}（{best["code"]}）</a>'
+                f'<span style="color:#9333ea;"> 💎{best.get("shikomi", 0)}点</span></div>'
+            )
+        cards.append(f"""
+        <div style="background:#ffffff;border:1px solid #c7d2fe;border-radius:10px;padding:10px 14px;margin-bottom:8px;">
+          <div style="font-size:15px;font-weight:bold;">
+            {medals[i] if i < 3 else ''} {t['theme']}
+            <span style="font-size:12px;color:#64748b;margin-left:6px;">おすすめ度 {t['rec_score']:.0f}</span>
+            <span style="font-size:12px;color:{_chg_color(t.get('avg_week'))};margin-left:6px;">週間{t.get('avg_week', 0):+.1f}%</span>
+          </div>
+          <div style="font-size:12px;color:#4338ca;margin-top:2px;">{t['rec_reasons']}</div>
+          {best_html}
+        </div>""")
+    return f"""
+      <div style="background:#eef2ff;border:2px solid #4f46e5;border-radius:12px;padding:14px 16px;margin-bottom:18px;">
+        <div style="font-size:14px;color:#4f46e5;font-weight:bold;margin-bottom:8px;">
+          🔮 次週の狙い目 国策テーマ TOP3（週間サマリー）
+        </div>
+        <div style="font-size:11px;color:#64748b;margin-bottom:8px;">
+          基準：割安・出遅れの余地（平均仕込み度）を主役に、🟢買い場の増え方＝動き始めの兆しを加点、
+          急騰済み・過熱テーマは減点。「安いのに静かに動き始めたテーマ」が上位。
+        </div>
+        {''.join(cards)}
+      </div>"""
+
+
 def render_html(rows, todays_themes, theme_ranking=None, highlight=None,
-                shikomi_list=None, holdings_html="") -> str:
-    today = datetime.now().strftime("%Y/%m/%d (%a)")
+                shikomi_list=None, holdings_html="", weekly_recs=None,
+                is_weekly=False) -> str:
+    today = now_jst().strftime("%Y/%m/%d (%a)")
+    weekly_html = _render_weekly(weekly_recs or []) if is_weekly else ""
 
     theme_badges = "".join(
         f'<span style="display:inline-block;margin:3px;padding:3px 10px;'
@@ -506,6 +654,7 @@ def render_html(rows, todays_themes, theme_ranking=None, highlight=None,
         return f"""<div style="font-family:'Hiragino Kaku Gothic Pro','Yu Gothic',sans-serif;color:#1e293b;max-width:700px;">
           <h2 style="color:#2563eb;">📈 本日の国策銘柄レポート（{today}）</h2>
           {holdings_html}
+          {weekly_html}
           {theme_section}
           <p style="background:#f1f5f9;padding:12px;border-radius:8px;">
             本日は上記テーマ内に表示できる銘柄がありませんでした（データ取得エラーの可能性）。
@@ -561,9 +710,10 @@ def render_html(rows, todays_themes, theme_ranking=None, highlight=None,
         </tr>""")
 
     return f"""<div style="font-family:'Hiragino Kaku Gothic Pro','Yu Gothic',sans-serif;color:#1e293b;max-width:720px;">
-      <h2 style="color:#2563eb;margin-bottom:4px;">📈 本日の国策銘柄レポート（{today}）</h2>
+      <h2 style="color:#2563eb;margin-bottom:4px;">📈 {'週間サマリー＆国策銘柄レポート' if is_weekly else '本日の国策銘柄レポート'}（{today}）</h2>
       <p style="color:#64748b;font-size:12px;margin-top:0;">{subtitle}</p>
       {holdings_html}
+      {weekly_html}
       {_render_shikomi(shikomi_list or [])}
       {_render_highlight(highlight)}
       {_render_theme_ranking(theme_ranking or [])}
@@ -599,7 +749,7 @@ def render_html(rows, todays_themes, theme_ranking=None, highlight=None,
 
 # ── 送信 ──────────────────────────────────────────
 
-def send(html: str):
+def send(html: str, subject: str | None = None):
     addr = os.environ.get("GMAIL_ADDRESS")
     pw   = os.environ.get("GMAIL_APP_PASSWORD")
     to   = os.environ.get("MAIL_TO", addr)
@@ -611,7 +761,7 @@ def send(html: str):
         return
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"📈 本日の国策銘柄レポート {datetime.now():%m/%d}"
+    msg["Subject"] = subject or f"📈 本日の国策銘柄レポート {now_jst():%m/%d}"
     msg["From"]    = addr
     msg["To"]      = to
     msg.attach(MIMEText(html, "html", "utf-8"))
@@ -624,14 +774,29 @@ def send(html: str):
 
 
 if __name__ == "__main__":
-    holdings_html = ""
+    # 土曜の朝（JST）は週間サマリーモード（次週のおすすめテーマ付き）
+    is_weekly = FORCE_WEEKLY or now_jst().weekday() == 5
+    print(f"モード: {'週間サマリー' if is_weekly else '日次'}（JST {now_jst():%Y-%m-%d %H:%M}）")
+
+    holdings_html, target_hit = "", False
     try:
         hrows = build_holdings_report()
         print(f"保有銘柄: {len(hrows)} 件")
         holdings_html = _render_holdings(hrows)
+        target_hit = any(r.get("target_status") in ("hit_buy", "hit_sell") for r in hrows)
     except Exception as e:
         print(f"保有銘柄レポートの構築に失敗しました（テーマレポートは続行します）: {e}")
 
-    rows, themes, ranking, highlight, shikomi_list = build_todays_report()
+    rows, themes, ranking, highlight, shikomi_list, weekly_recs = build_todays_report()
     print(f"送信銘柄: {len(rows)} 件（💎仕込み候補 {len(shikomi_list)} 件）")
-    send(render_html(rows, themes, ranking, highlight, shikomi_list, holdings_html))
+
+    # 件名：🎯目標到達が最優先、次に週間サマリー
+    if is_weekly:
+        subject = f"📈 週間サマリー＆次週の狙い目テーマ {now_jst():%m/%d}"
+    else:
+        subject = f"📈 本日の国策銘柄レポート {now_jst():%m/%d}"
+    if target_hit:
+        subject = "🎯目標株価に到達！｜" + subject
+
+    send(render_html(rows, themes, ranking, highlight, shikomi_list,
+                     holdings_html, weekly_recs, is_weekly), subject)

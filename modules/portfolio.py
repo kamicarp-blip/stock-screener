@@ -137,6 +137,7 @@ def analyze_holding(h: dict) -> dict | None:
             "label": sig["label"],
             "reasons": sig["reasons"],
             "prev_change": sig["prev_change"],
+            "week_change": sig.get("week_change"),
             "rsi": sig["rsi"],
             "dev25": sig["dev25"],
             "pos6m": sig["pos6m"],
@@ -148,6 +149,24 @@ def analyze_holding(h: dict) -> dict | None:
         row["action"] = None
         row["label"] = "－"
         row["reasons"] = ""
+
+    # 🎯目標株価（target_buy=買い増し目標・以下で通知 / target_sell=売却目標・以上で通知）
+    tb, ts = h.get("target_buy"), h.get("target_sell")
+    row["target_buy"], row["target_sell"] = tb, ts
+    row["target_status"] = None
+    if price:
+        try:
+            p = float(price)
+            if tb and p <= float(tb):
+                row["target_status"] = "hit_buy"       # 目標買値に到達
+            elif ts and p >= float(ts):
+                row["target_status"] = "hit_sell"      # 目標売値に到達
+            elif tb and p <= float(tb) * 1.03:
+                row["target_status"] = "near_buy"      # 目標買値まであと3%以内
+            elif ts and p >= float(ts) * 0.97:
+                row["target_status"] = "near_sell"     # 目標売値まであと3%以内
+        except Exception:
+            pass
 
     # 損益
     buy_price = h.get("buy_price")

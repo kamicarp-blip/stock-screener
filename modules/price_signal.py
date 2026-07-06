@@ -32,6 +32,7 @@ def buy_timing(code: str) -> dict | None:
         rsi = float(rsi_series.iloc[-1])
         dev25 = (c - m25) / m25 * 100  # 25日線からの乖離率(%)
         prev_change = (c - float(close.iloc[-2])) / float(close.iloc[-2]) * 100
+        week_change = (c - float(close.iloc[-6])) / float(close.iloc[-6]) * 100  # 週間騰落率(5営業日)
 
         # 直近6ヶ月レンジ内の株価位置（0=安値圏、100=高値圏）
         lo6, hi6 = float(close.min()), float(close.max())
@@ -76,6 +77,7 @@ def buy_timing(code: str) -> dict | None:
             "rsi": round(rsi, 1),
             "dev25": round(dev25, 1),
             "prev_change": round(prev_change, 2),
+            "week_change": round(week_change, 2),
             "pos6m": round(pos6m, 1),
         }
     except Exception:
@@ -104,6 +106,7 @@ def holding_signal(code: str) -> dict | None:
         rsi = float(rsi_series.iloc[-1])
         dev25 = (c - m25) / m25 * 100
         prev_change = (c - float(close.iloc[-2])) / float(close.iloc[-2]) * 100
+        week_change = (c - float(close.iloc[-6])) / float(close.iloc[-6]) * 100
 
         lo6, hi6 = float(close.min()), float(close.max())
         pos6m = (c - lo6) / (hi6 - lo6) * 100 if hi6 > lo6 else 50.0
@@ -148,6 +151,7 @@ def holding_signal(code: str) -> dict | None:
             "reasons": "・".join(reasons),
             "price": round(c, 1),
             "prev_change": round(prev_change, 2),
+            "week_change": round(week_change, 2),
             "rsi": round(rsi, 1),
             "dev25": round(dev25, 1),
             "pos6m": round(pos6m, 1),

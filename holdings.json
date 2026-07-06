@@ -1,6 +1,6 @@
 {
-  "_使い方": "保有銘柄を下のholdingsに追加。code=4桁の銘柄コード（必須）、buy_price=平均取得単価・円（任意、nullでもOK）、shares=株数（任意）。nameは自動取得されるので省略可",
+  "_使い方": "保有銘柄を下のholdingsに追加。code=4桁の銘柄コード（必須）。他は任意（nullでOK）：buy_price=平均取得単価・円、shares=株数、target_buy=買い増し目標株価・円（これ以下になったらメールで🎯通知）、target_sell=売却目標株価・円（これ以上になったら🎯通知）。nameは自動取得されるので省略可",
   "holdings": [
-    {"code": "8088", "buy_price": null, "shares": null}
+    {"code": "8088", "buy_price": null, "shares": null, "target_buy": null, "target_sell": null}
   ]
 }
