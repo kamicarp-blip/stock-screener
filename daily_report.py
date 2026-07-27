@@ -57,13 +57,18 @@ FORCE_WEEKLY      = os.environ.get("FORCE_WEEKLY", "0").strip() == "1"
 # ──────────────────────────────────────────────────
 
 
-def shikomi_score(r: dict) -> tuple[int, list[str]]:
+def shikomi_score(r: dict) -> tuple[int, list[str], list[str]]:
     """💎仕込み度（0〜100）：未来テーマ×割安×まだ安値圏 を採点。
 
     「良いテーマなのにまだ上がっていない株」ほど高得点。
     すでに急騰した株（過熱）は減点して弾く。
+
+    ただし割安には「安いなりの理由」があることも多い（バリュートラップ）。
+    減収・減益・営業赤字・債務過多は減点し、⚠️警告として返す。
+
+    戻り値: (仕込み度0〜100, 加点理由リスト, ⚠️警告リスト)
     """
-    pts, reasons = 0, []
+    pts, reasons, warnings = 0, [], []
 
     # ── 割安（最大45点）──
     per, pbr, psr = r.get("per"), r.get("pbr"), r.get("psr")
@@ -114,11 +119,42 @@ def shikomi_score(r: dict) -> tuple[int, list[str]]:
         pts += 10
         reasons.append(f"増収{rg:.0f}%")
 
+    # ── バリュートラップ減点（安いには理由がある、を見逃さない）──
+    if rg is not None:
+        if rg < -10:
+            pts -= 20
+            warnings.append(f"大幅減収（{rg:.0f}%）")
+        elif rg < 0:
+            pts -= 10
+            warnings.append(f"減収中（{rg:.0f}%）")
+
+    eg = r.get("earnings_growth")
+    if eg is not None:
+        if eg < -20:
+            pts -= 20
+            warnings.append(f"大幅減益（{eg:.0f}%）")
+        elif eg < 0:
+            pts -= 10
+            warnings.append(f"減益中（{eg:.0f}%）")
+
+    om = r.get("operating_margin")
+    if om is not None and om < 0:
+        pts -= 20
+        warnings.append(f"営業赤字（{om:.1f}%）")
+
+    if eq is not None:
+        if eq < 20:
+            pts -= 25
+            warnings.append(f"自己資本比率{eq:.0f}%と債務過多")
+        elif eq < 30:
+            pts -= 15
+            warnings.append(f"自己資本比率{eq:.0f}%と低め")
+
     # すでに急騰した株は仕込み対象から外す
     if r.get("signal") == "hot":
         pts = max(0, pts - 40)
 
-    return min(100, pts), reasons[:4]
+    return max(0, min(100, pts)), reasons[:4], warnings
 
 
 def _theme_momentum(all_rows: list[dict]) -> list[dict]:
@@ -226,7 +262,8 @@ def recommend_next_week(theme_stats: list[dict], all_rows: list[dict]) -> list[d
 
         # テーマ内の代表仕込み銘柄（過熱を除く仕込み度トップ）
         cands = [r for r in all_rows
-                 if r.get("theme") == t["theme"] and r.get("signal") not in (None, "hot")]
+                 if r.get("theme") == t["theme"] and r.get("signal") not in (None, "hot")
+                 and not r.get("trap_excluded")]
         cands.sort(key=lambda x: (-x.get("shikomi", 0), -x["score"]))
         best = cands[0] if cands else None
 
@@ -309,8 +346,12 @@ def build_todays_report():
             row["signal"] = None
             row["buy_label"] = "－"
 
-        # 💎仕込み度（未来×割安×出遅れ）
-        row["shikomi"], row["shikomi_reasons"] = shikomi_score(row)
+        # 💎仕込み度（未来×割安×出遅れ）／⚠️バリュートラップ警告
+        row["shikomi"], row["shikomi_reasons"], row["trap_warnings"] = shikomi_score(row)
+        row["trap_excluded"] = bool(
+            (row.get("operating_margin") is not None and row["operating_margin"] < 0)
+            or len(row["trap_warnings"]) >= 2
+        )
         return row
 
     all_rows = []
@@ -366,7 +407,8 @@ def build_todays_report():
 
     # ⑥ 💎仕込み候補：仕込み度の高い順 TOP5（過熱は除外・買い時取得済みのみ）
     shikomi_list = [r for r in all_rows
-                    if r.get("signal") not in (None, "hot") and r["shikomi"] >= 45]
+                    if r.get("signal") not in (None, "hot") and r["shikomi"] >= 45
+                    and not r.get("trap_excluded")]
     shikomi_list.sort(key=lambda x: (-x["shikomi"], -x["score"]))
     shikomi_list = shikomi_list[:5]
     for r in shikomi_list:
@@ -674,9 +716,57 @@ def _render_weekly(weekly_recs: list[dict]) -> str:
       </div>"""
 
 
+def _render_action_summary(hrows: list[dict], shikomi_list: list[dict]) -> str:
+    """📌 今日やること：メール最上部の要約バッジ。
+
+    保有銘柄の要対応件数と💎新規仕込み候補の件数を、開いた瞬間に
+    判断できるようバッジで並べる。保有銘柄側が全て0件なら
+    「対応不要」であることを明示し、安心して閉じられるようにする。
+    """
+    hrows = hrows or []
+    shikomi_list = shikomi_list or []
+
+    target_n = sum(1 for r in hrows if r.get("target_status") in ("hit_buy", "hit_sell"))
+    plunge_n = sum(1 for r in hrows if r.get("action") == "plunge")
+    profit_n = sum(1 for r in hrows if r.get("action") == "take_profit")
+    buymore_n = sum(1 for r in hrows if r.get("action") == "buy_more")
+    earnings_n = sum(1 for r in hrows if r.get("earnings_soon"))
+    shikomi_n = len(shikomi_list)
+
+    items = [
+        ("🎯", "目標到達", target_n, "#dcfce7", "#166534"),
+        ("📉", "急落", plunge_n, "#fee2e2", "#991b1b"),
+        ("🔴", "利益確定検討", profit_n, "#fee2e2", "#991b1b"),
+        ("💰", "買い増しチャンス", buymore_n, "#dcfce7", "#166534"),
+        ("⚠️", "決算発表が近い", earnings_n, "#fef3c7", "#92400e"),
+        ("💎", "新しい仕込み候補", shikomi_n, "#faf5ff", "#7c3aed"),
+    ]
+
+    badges = "".join(
+        f'<span style="display:inline-block;margin:3px 6px 3px 0;padding:4px 12px;'
+        f'background:{bg};border-radius:14px;font-size:13px;font-weight:bold;color:{fg};">'
+        f'{icon} {label} {n}件</span>'
+        for icon, label, n, bg, fg in items if n
+    )
+
+    holdings_empty = (target_n + plunge_n + profit_n + buymore_n + earnings_n) == 0
+    empty_note = (
+        '<div style="font-size:13px;color:#64748b;margin-top:4px;">'
+        '本日：保有銘柄で対応が必要なものはありません</div>'
+        if holdings_empty else ""
+    )
+
+    return f"""
+      <div style="background:#f8fafc;border:2px solid #2563eb;border-radius:12px;padding:12px 16px;margin-bottom:16px;">
+        <div style="font-size:13px;color:#2563eb;font-weight:bold;margin-bottom:4px;">📌 今日やること</div>
+        <div>{badges}</div>
+        {empty_note}
+      </div>"""
+
+
 def render_html(rows, todays_themes, theme_ranking=None, highlight=None,
                 shikomi_list=None, holdings_html="", weekly_recs=None,
-                is_weekly=False) -> str:
+                is_weekly=False, action_html="") -> str:
     today = now_jst().strftime("%Y/%m/%d (%a)")
     weekly_html = _render_weekly(weekly_recs or []) if is_weekly else ""
 
@@ -693,6 +783,7 @@ def render_html(rows, todays_themes, theme_ranking=None, highlight=None,
     if not rows:
         return f"""<div style="font-family:'Hiragino Kaku Gothic Pro','Yu Gothic',sans-serif;color:#1e293b;max-width:700px;">
           <h2 style="color:#2563eb;">📈 本日の国策銘柄レポート（{today}）</h2>
+          {action_html}
           {holdings_html}
           {weekly_html}
           {theme_section}
@@ -729,6 +820,12 @@ def render_html(rows, todays_themes, theme_ranking=None, highlight=None,
         shk = r.get("shikomi", 0)
         shk_color = "#9333ea" if shk >= 60 else "#64748b"
 
+        trap_warnings = r.get("trap_warnings") or []
+        warn_html = (
+            "<br><span style='font-size:11px;color:#dc2626;'>⚠️ " + "・".join(trap_warnings) + "</span>"
+            if trap_warnings else ""
+        )
+
         trs.append(f"""
         <tr style="border-bottom:1px solid #e2e8f0;">
           <td style="padding:8px 6px;text-align:center;color:#64748b;font-size:12px;">{i}</td>
@@ -742,6 +839,7 @@ def render_html(rows, todays_themes, theme_ranking=None, highlight=None,
             <a href="{link}" style="color:#2563eb;text-decoration:none;font-weight:bold;">{r['name']}</a><br>
             <span style="font-size:11px;color:#64748b;">{r['code']} ／ {r.get('theme','')}</span>
             {"<br><span style='font-size:11px;color:#16a34a;'>" + reason + "</span>" if reason else ""}
+            {warn_html}
           </td>
           <td style="padding:8px 6px;text-align:right;color:{_chg_color(pc)};font-weight:bold;">{_fmt(pc,'%',2)}</td>
           <td style="padding:8px 6px;text-align:right;font-size:12px;">{_fmt(r.get('per'),'倍')}</td>
@@ -752,6 +850,7 @@ def render_html(rows, todays_themes, theme_ranking=None, highlight=None,
     return f"""<div style="font-family:'Hiragino Kaku Gothic Pro','Yu Gothic',sans-serif;color:#1e293b;max-width:720px;">
       <h2 style="color:#2563eb;margin-bottom:4px;">📈 {'週間サマリー＆国策銘柄レポート' if is_weekly else '本日の国策銘柄レポート'}（{today}）</h2>
       <p style="color:#64748b;font-size:12px;margin-top:0;">{subtitle}</p>
+      {action_html}
       {holdings_html}
       {weekly_html}
       {_render_shikomi(shikomi_list or [])}
@@ -777,7 +876,9 @@ def render_html(rows, todays_themes, theme_ranking=None, highlight=None,
       <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 14px;margin-top:14px;font-size:12px;">
         <b>💎仕込み度とは：</b>「国策テーマなのに、まだ安い株」の度合い（100点満点）。<br>
         割安（PER15倍以下・PBR1倍以下・PSR1倍以下・ネットキャッシュ）＋財務の堅さ＋
-        <b>6ヶ月レンジの安値圏にいる（出遅れ）</b>＋増収、で採点。60点以上が有力候補。<br><br>
+        <b>6ヶ月レンジの安値圏にいる（出遅れ）</b>＋増収、で採点。60点以上が有力候補。<br>
+        ⚠️マークは減収・減益・営業赤字・債務過多など「安いには理由がある」サイン。
+        該当銘柄は💎仕込み候補から自動的に除外しています。<br><br>
         <b>買い時シグナルの見方：</b><br>
         🟢 買い場 ＝ 上昇トレンド（株価＞75日線）＋ 押し目 or ゴールデンクロス or RSI健全<br>
         ⬜ 中立 ＝ 条件は揃っていないが過熱でもない（仕込みは中立のうちが基本）<br>
@@ -819,6 +920,7 @@ if __name__ == "__main__":
     print(f"モード: {'週間サマリー' if is_weekly else '日次'}（JST {now_jst():%Y-%m-%d %H:%M}）")
 
     holdings_html, target_hit = "", False
+    hrows = []
     try:
         hrows = build_holdings_report()
         print(f"保有銘柄: {len(hrows)} 件")
@@ -830,6 +932,8 @@ if __name__ == "__main__":
     rows, themes, ranking, highlight, shikomi_list, weekly_recs = build_todays_report()
     print(f"送信銘柄: {len(rows)} 件（💎仕込み候補 {len(shikomi_list)} 件）")
 
+    action_html = _render_action_summary(hrows, shikomi_list)
+
     # 件名：🎯目標到達が最優先、次に週間サマリー
     if is_weekly:
         subject = f"📈 週間サマリー＆次週の狙い目テーマ {now_jst():%m/%d}"
@@ -839,4 +943,4 @@ if __name__ == "__main__":
         subject = "🎯目標株価に到達！｜" + subject
 
     send(render_html(rows, themes, ranking, highlight, shikomi_list,
-                     holdings_html, weekly_recs, is_weekly), subject)
+                     holdings_html, weekly_recs, is_weekly, action_html), subject)
