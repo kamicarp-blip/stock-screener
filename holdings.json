@@ -7,7 +7,7 @@
     {"code": "6361", "buy_price": 1819, "shares": 10, "target_buy": null, "target_sell": null},
     {"code": "6378", "buy_price": 1285, "shares": 200, "target_buy": null, "target_sell": null},
     {"code": "6965", "buy_price": 2367, "shares": 40, "target_buy": null, "target_sell": null},
-    {"code": "7011", "buy_price": 1678, "shares": 33330, "target_buy": null, "target_sell": null},
+    {"code": "7011", "buy_price": 1678, "shares": 10, "target_buy": null, "target_sell": null},
     {"code": "7012", "buy_price": 1150, "shares": 50, "target_buy": null, "target_sell": null},
     {"code": "7537", "buy_price": 1605, "shares": 3, "target_buy": null, "target_sell": null},
     {"code": "8604", "buy_price": 776, "shares": 100, "target_buy": null, "target_sell": null},
