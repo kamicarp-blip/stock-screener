@@ -3,9 +3,13 @@ import pandas as pd
 import yfinance as yf
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_financial_data(code: str) -> dict | None:
-    """yfinance で日本株の財務データを取得（コード.T 形式）"""
+def _get_financial_data_uncached(code: str) -> dict | None:
+    """yfinance で日本株の財務データを取得（コード.T 形式）。
+
+    キャッシュを経由しない実体。with_retry() でリトライする際は必ずこちらを
+    呼ぶこと（get_financial_data経由だと失敗=Noneがキャッシュされ、
+    リトライしても実際には再実行されず同じNoneが即返るだけになるため）。
+    """
     try:
         ticker = yf.Ticker(f"{code}.T")
         info = ticker.info
@@ -45,6 +49,12 @@ def get_financial_data(code: str) -> dict | None:
         }
     except Exception:
         return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_financial_data(code: str) -> dict | None:
+    """yfinance で日本株の財務データを取得（キャッシュあり。Streamlit UI用）"""
+    return _get_financial_data_uncached(code)
 
 
 def _safe(val) -> float | None:

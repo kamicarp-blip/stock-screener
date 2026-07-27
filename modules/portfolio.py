@@ -9,9 +9,10 @@ from datetime import datetime, date
 
 import yfinance as yf
 
-from modules.financial_data import get_financial_data
+from modules.financial_data import _get_financial_data_uncached
 from modules.theme_search import get_kabutan_name
-from modules.price_signal import holding_signal
+from modules.price_signal import _holding_signal_uncached
+from modules.yf_retry import with_retry
 
 EARNINGS_SOON_DAYS = 14
 
@@ -105,7 +106,10 @@ def analyze_holding(h: dict) -> dict | None:
     if not code:
         return None
 
-    fin = get_financial_data(code) or {}
+    # with_retryには必ず_uncached版を渡す。st.cache_data付きの関数を渡すと
+    # 1回目の失敗(None)がキャッシュされ、リトライしても再実行されず
+    # 同じNoneが即返るだけになる。
+    fin = with_retry(_get_financial_data_uncached, code) or {}
 
     name = h.get("name") or get_kabutan_name(code)
 
@@ -130,7 +134,7 @@ def analyze_holding(h: dict) -> dict | None:
     }
 
     # 行動シグナル
-    sig = holding_signal(code)
+    sig = with_retry(_holding_signal_uncached, code)
     if sig:
         row.update({
             "action": sig["action"],

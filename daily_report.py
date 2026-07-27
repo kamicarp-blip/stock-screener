@@ -33,10 +33,11 @@ except Exception:
     pass
 
 from modules.theme_search import get_trending_themes, get_theme_stocks_by_name
-from modules.financial_data import get_financial_data, score_stock
-from modules.price_signal import buy_timing
+from modules.financial_data import get_financial_data, score_stock, _get_financial_data_uncached
+from modules.price_signal import buy_timing, _buy_timing_uncached
 from modules import portfolio
 from modules.news_fetcher import get_stock_news
+from modules.yf_retry import with_retry
 
 # ── 国策テーマ（高市政権の重点分野ベース。株探で銘柄が返る正式名）──
 KOKUSAKU_THEMES = [
@@ -273,23 +274,33 @@ def build_todays_report():
     print(f"銘柄収集（確定）: {len(raw_stocks)} 社")
 
     # ③ 財務データ＋スコア＋買い時シグナルを全銘柄で取得
-    all_rows = []
-    for s in raw_stocks:
-        fin = get_financial_data(s["code"])
+    #    yfinance呼び出し（get_financial_data / buy_timing）はGitHub Actionsの
+    #    クラウド出口IPからの大量連続アクセスでYahoo Finance側にレート制限/
+    #    ブロックされることがあるため、各呼び出しを指数バックオフ付きリトライで
+    #    ラップし、さらに成功率が極端に低い場合は失敗銘柄だけ全体を再試行する。
+    def _fetch_row(s: dict) -> dict | None:
+        """1銘柄分の財務データ＋買い時シグナルを取得する（失敗時はNone）。
+
+        with_retry には必ず _uncached 版を渡すこと。st.cache_data 付きの
+        get_financial_data / buy_timing をそのまま渡すと、1回目の失敗（None）
+        がキャッシュされ、リトライしても実際には再実行されず同じNoneが
+        即座に返るだけになり、リトライが機能しない。
+        """
+        fin = with_retry(_get_financial_data_uncached, s["code"])
         if not fin:
-            time.sleep(0.1)
-            continue
+            return None
         fin["name"]  = s["name"]
         fin["theme"] = s["theme"]
         row = {**fin, **score_stock(fin)}
 
-        bt = buy_timing(s["code"])
+        bt = with_retry(_buy_timing_uncached, s["code"])
         if bt:
             row.update({
                 "signal":      bt["signal"],
                 "buy_label":   bt["label"],
                 "buy_reason":  bt["reasons"],
                 "prev_change": bt["prev_change"],
+                "week_change": bt.get("week_change"),
                 "rsi":         bt["rsi"],
                 "dev25":       bt["dev25"],
                 "pos6m":       bt.get("pos6m"),
@@ -300,9 +311,38 @@ def build_todays_report():
 
         # 💎仕込み度（未来×割安×出遅れ）
         row["shikomi"], row["shikomi_reasons"] = shikomi_score(row)
-        all_rows.append(row)
-        time.sleep(0.15)
+        return row
 
+    all_rows = []
+    failed_stocks = []
+    for s in raw_stocks:
+        row = _fetch_row(s)
+        if row is None:
+            failed_stocks.append(s)
+        else:
+            all_rows.append(row)
+        time.sleep(0.35)
+
+    total = len(raw_stocks)
+    success_rate = (len(all_rows) / total) if total else 0.0
+
+    # 成功率が極端に低い（30%未満）かつ母数が十分ある場合は、Yahoo Finance側の
+    # レート制限を疑い、90秒待ってから失敗した銘柄だけもう一度取得し直す（最大1回）。
+    if total >= 20 and success_rate < 0.3 and failed_stocks:
+        print(f"財務データ取得成功率が低い（{success_rate*100:.0f}%）ため90秒待って再試行します...")
+        time.sleep(90)
+        still_failed = []
+        for s in failed_stocks:
+            row = _fetch_row(s)
+            if row is None:
+                still_failed.append(s)
+            else:
+                all_rows.append(row)
+            time.sleep(0.35)
+        failed_stocks = still_failed
+
+    final_rate = (len(all_rows) / total * 100) if total else 0.0
+    print(f"財務データ取得成功率: {final_rate:.0f}% ({len(all_rows)}/{total}社)")
     print(f"財務＋シグナル取得: {len(all_rows)} 社")
 
     # ④ テーマ別の勢いランキング

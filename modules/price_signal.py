@@ -10,9 +10,11 @@ def _rsi(close, period: int = 14):
     return 100 - 100 / (1 + rs)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def buy_timing(code: str) -> dict | None:
-    """前日終値までの値動きから『買い時』を判定。
+def _buy_timing_uncached(code: str) -> dict | None:
+    """前日終値までの値動きから『買い時』を判定するキャッシュなしの実体。
+
+    with_retry() でリトライする際は必ずこちらを呼ぶこと（buy_timing経由だと
+    失敗=Noneがキャッシュされ、リトライしても再実行されず即Noneが返るだけになる）。
 
     戻り値: {signal, label, reasons, rsi, dev25, prev_change}
     signal: 'buy' / 'neutral' / 'hot'
@@ -85,8 +87,15 @@ def buy_timing(code: str) -> dict | None:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def holding_signal(code: str) -> dict | None:
+def buy_timing(code: str) -> dict | None:
+    """前日終値までの値動きから『買い時』を判定（キャッシュあり。Streamlit UI用）"""
+    return _buy_timing_uncached(code)
+
+
+def _holding_signal_uncached(code: str) -> dict | None:
     """長期保有者向け：すでに持っている株を『どうするか』の行動シグナル。
+
+    キャッシュなしの実体。with_retry() でリトライする際は必ずこちらを呼ぶこと。
 
     戻り値: {action, label, reasons, price, prev_change, rsi, dev25, pos6m}
     action: plunge / take_profit / trend_warning / buy_more / hold
@@ -158,3 +167,9 @@ def holding_signal(code: str) -> dict | None:
         }
     except Exception:
         return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def holding_signal(code: str) -> dict | None:
+    """長期保有者向け行動シグナル（キャッシュあり。Streamlit UI用）"""
+    return _holding_signal_uncached(code)
