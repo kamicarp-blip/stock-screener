@@ -1,9 +1,9 @@
 name: daily-stock-report
 
 on:
-  schedule:
-    - cron: "0 22 * * *"   # 毎日 07:00 JST（UTC 22:00）
-  workflow_dispatch: {}      # 手動実行ボタン
+  # schedule:
+  #   - cron: "0 22 * * *"   # 毎日 07:00 JST（UTC 22:00）※一時停止中。再開する場合はこの2行のコメントを外す
+  workflow_dispatch: {}      # 手動実行ボタン（停止中でもこれは使える）
 
 jobs:
   report:
