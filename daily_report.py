@@ -32,10 +32,13 @@ try:
 except Exception:
     pass
 
+import yfinance as yf
+
 from modules.theme_search import get_trending_themes, get_theme_stocks_by_name
 from modules.financial_data import get_financial_data, score_stock, _get_financial_data_uncached
 from modules.price_signal import buy_timing, _buy_timing_uncached
 from modules import portfolio
+from modules import history
 from modules.news_fetcher import get_stock_news
 from modules.yf_retry import with_retry
 
@@ -54,7 +57,12 @@ TOP_N             = int(os.environ.get("REPORT_TOP_N",      "15").strip() or "15
 USE_TRENDING      = os.environ.get("USE_TRENDING", "0").strip() == "1"
 # 週間サマリーを強制する（テスト用。通常は土曜朝に自動で週間モード）
 FORCE_WEEKLY      = os.environ.get("FORCE_WEEKLY", "0").strip() == "1"
+# 📊月次レビュー（答え合わせ）を強制する（テスト用。通常は毎月1日の朝に自動表示）
+FORCE_REVIEW      = os.environ.get("FORCE_REVIEW", "0").strip() == "1"
 # ──────────────────────────────────────────────────
+
+# 診断用：直近実行の結果サマリー（history/last_run_debug.txt に保存して原因究明に使う）
+_RUN_STATS: dict = {}
 
 
 def shikomi_score(r: dict) -> tuple[int, list[str], list[str]]:
@@ -309,6 +317,8 @@ def build_todays_report():
             print(f"収集数が{MIN_STOCKS}社未満のため60秒待って再収集します...")
             time.sleep(60)
     print(f"銘柄収集（確定）: {len(raw_stocks)} 社")
+    _RUN_STATS["theme_collect_attempts"] = attempt
+    _RUN_STATS["theme_collect_total"] = len(raw_stocks)
 
     # ③ 財務データ＋スコア＋買い時シグナルを全銘柄で取得
     #    yfinance呼び出し（get_financial_data / buy_timing）はGitHub Actionsの
@@ -385,6 +395,9 @@ def build_todays_report():
     final_rate = (len(all_rows) / total * 100) if total else 0.0
     print(f"財務データ取得成功率: {final_rate:.0f}% ({len(all_rows)}/{total}社)")
     print(f"財務＋シグナル取得: {len(all_rows)} 社")
+    _RUN_STATS["fin_success_rate"] = final_rate
+    _RUN_STATS["fin_success_n"] = len(all_rows)
+    _RUN_STATS["fin_total"] = total
 
     # ④ テーマ別の勢いランキング
     theme_ranking = _theme_momentum(all_rows)
@@ -438,6 +451,74 @@ def build_holdings_report() -> list[dict]:
         except Exception:
             r["news"] = []
     return rows
+
+
+def build_review_report() -> dict | None:
+    """📊 1ヶ月前の💎仕込み候補の答え合わせデータを組み立てる。
+
+    history.jsonlから約30日前の推薦を拾い、現在株価と比較して騰落率・勝率を出す。
+    ベンチマークとして同期間の日経平均騰落率も添える。
+    対象銘柄が無ければNoneを返す（メールではセクションごと非表示）。
+    """
+    records = history.load_recommendations()
+    targets = history.pick_review_targets(records, days_ago=30)
+    if not targets:
+        return None
+
+    results = []
+    for t in targets:
+        fin = with_retry(_get_financial_data_uncached, t["code"])
+        time.sleep(0.3)
+        if not fin or fin.get("current_price") is None:
+            continue
+        price = t.get("price")
+        if not price:
+            continue
+        now_price = fin["current_price"]
+        change_pct = (now_price - price) / price * 100
+        results.append({
+            "code": t.get("code"),
+            "name": t.get("name", ""),
+            "theme": t.get("theme", ""),
+            "shikomi": t.get("shikomi"),
+            "price": price,
+            "now_price": now_price,
+            "change_pct": change_pct,
+            "date": t.get("date"),
+        })
+
+    if not results:
+        return None
+
+    results.sort(key=lambda x: -x["change_pct"])
+    n = len(results)
+    avg_change = sum(r["change_pct"] for r in results) / n
+    win_rate = sum(1 for r in results if r["change_pct"] > 0) / n * 100
+    from_date = min(t.get("date") for t in targets)
+
+    # ── ベンチマーク：同期間の日経平均騰落率 ──
+    benchmark = None
+    try:
+        n225 = yf.Ticker("^N225").history(period="3mo")
+        time.sleep(0.3)
+        if n225 is not None and len(n225):
+            target_date = datetime.strptime(from_date, "%Y-%m-%d").date()
+            dates = [ts.date() for ts in n225.index]
+            closest_i = min(range(len(dates)), key=lambda i: abs((dates[i] - target_date).days))
+            base_close = float(n225["Close"].iloc[closest_i])
+            recent_close = float(n225["Close"].iloc[-1])
+            benchmark = (recent_close - base_close) / base_close * 100
+    except Exception:
+        benchmark = None
+
+    return {
+        "targets": results,
+        "avg_change": avg_change,
+        "win_rate": win_rate,
+        "n": n,
+        "benchmark": benchmark,
+        "from_date": from_date,
+    }
 
 
 # ── HTML生成 ──────────────────────────────────────
@@ -764,9 +845,78 @@ def _render_action_summary(hrows: list[dict], shikomi_list: list[dict]) -> str:
       </div>"""
 
 
+def _render_review(review: dict | None) -> str:
+    """📊 1ヶ月前の仕込み候補の答え合わせセクション（毎月1日 or FORCE_REVIEW限定）。
+
+    reviewがNone（対象銘柄なし）ならセクションごと非表示にする。
+    """
+    if not review:
+        return ""
+
+    avg = review["avg_change"]
+    bench = review.get("benchmark")
+    n = review["n"]
+    win_rate = review["win_rate"]
+    win_n = sum(1 for t in review["targets"] if t["change_pct"] > 0)
+
+    if bench is not None:
+        diff = avg - bench
+        emphasis = "#16a34a" if diff >= 0 else "#dc2626"
+        bench_html = f"日経平均 {bench:+.1f}% → 差 <b>{diff:+.1f}%</b>"
+    else:
+        emphasis = "#16a34a" if avg >= 0 else "#dc2626"
+        bench_html = "日経平均 －"
+
+    rows = []
+    for t in review["targets"]:
+        link = f"https://kabutan.jp/stock/?code={t['code']}"
+        cp = t["change_pct"]
+        rows.append(f"""
+        <tr style="border-bottom:1px solid #bae6fd;">
+          <td style="padding:6px 8px;font-size:11px;color:#64748b;white-space:nowrap;">{t.get('date','')}</td>
+          <td style="padding:6px 8px;">
+            <a href="{link}" style="color:#2563eb;text-decoration:none;font-weight:bold;">{t['name']}</a>
+            <span style="font-size:11px;color:#64748b;">{t['code']}</span>
+          </td>
+          <td style="padding:6px 8px;text-align:center;color:#9333ea;font-weight:bold;white-space:nowrap;">💎{t.get('shikomi', 0)}点</td>
+          <td style="padding:6px 8px;text-align:right;font-size:12px;white-space:nowrap;">{t['price']:,.0f}円</td>
+          <td style="padding:6px 8px;text-align:right;font-size:12px;white-space:nowrap;">{t['now_price']:,.0f}円</td>
+          <td style="padding:6px 8px;text-align:right;font-weight:bold;color:{_chg_color(cp)};white-space:nowrap;">{cp:+.1f}%</td>
+        </tr>""")
+
+    return f"""
+      <div style="background:#f0f9ff;border:2px solid #0284c7;border-radius:12px;padding:14px 16px;margin-bottom:18px;">
+        <div style="font-size:14px;color:#0284c7;font-weight:bold;margin-bottom:6px;">
+          📊 1ヶ月前の仕込み候補の答え合わせ
+        </div>
+        <div style="font-size:15px;color:{emphasis};margin-bottom:2px;">
+          平均 <b>{avg:+.1f}%</b>（{bench_html}）
+        </div>
+        <div style="font-size:13px;color:#334155;margin-bottom:8px;">
+          勝率 {win_n}/{n}銘柄（{win_rate:.0f}%）
+        </div>
+        <table style="border-collapse:collapse;width:100%;font-size:13px;background:#ffffff;border-radius:8px;overflow:hidden;">
+          <thead>
+            <tr style="background:#e0f2fe;font-size:11px;">
+              <th style="padding:6px;">推薦日</th>
+              <th style="padding:6px;text-align:left;">銘柄</th>
+              <th style="padding:6px;">推薦時💎</th>
+              <th style="padding:6px;">推薦時株価</th>
+              <th style="padding:6px;">現在株価</th>
+              <th style="padding:6px;">騰落率</th>
+            </tr>
+          </thead>
+          <tbody>{''.join(rows)}</tbody>
+        </table>
+        <div style="font-size:11px;color:#64748b;margin-top:8px;">
+          ※ この結果は💎仕込み度の精度を検証するためのものです。長期保有では1ヶ月は短い期間なので、参考程度にご覧ください。
+        </div>
+      </div>"""
+
+
 def render_html(rows, todays_themes, theme_ranking=None, highlight=None,
                 shikomi_list=None, holdings_html="", weekly_recs=None,
-                is_weekly=False, action_html="") -> str:
+                is_weekly=False, action_html="", review_html="") -> str:
     today = now_jst().strftime("%Y/%m/%d (%a)")
     weekly_html = _render_weekly(weekly_recs or []) if is_weekly else ""
 
@@ -784,6 +934,7 @@ def render_html(rows, todays_themes, theme_ranking=None, highlight=None,
         return f"""<div style="font-family:'Hiragino Kaku Gothic Pro','Yu Gothic',sans-serif;color:#1e293b;max-width:700px;">
           <h2 style="color:#2563eb;">📈 本日の国策銘柄レポート（{today}）</h2>
           {action_html}
+          {review_html}
           {holdings_html}
           {weekly_html}
           {theme_section}
@@ -851,6 +1002,7 @@ def render_html(rows, todays_themes, theme_ranking=None, highlight=None,
       <h2 style="color:#2563eb;margin-bottom:4px;">📈 {'週間サマリー＆国策銘柄レポート' if is_weekly else '本日の国策銘柄レポート'}（{today}）</h2>
       <p style="color:#64748b;font-size:12px;margin-top:0;">{subtitle}</p>
       {action_html}
+      {review_html}
       {holdings_html}
       {weekly_html}
       {_render_shikomi(shikomi_list or [])}
@@ -914,33 +1066,111 @@ def send(html: str, subject: str | None = None):
     print("メール送信完了:", to)
 
 
+def _write_run_debug_log(is_weekly: bool, rows: list, shikomi_list: list, error: Exception | None = None) -> None:
+    """実行結果のサマリーを history/last_run_debug.txt に上書き保存する。
+
+    次回以降「空メール」等の問題が起きたとき、GitHub Actions環境で実際に
+    何が起きたか（テーマ収集は成功したか／財務データ取得成功率は何%だったか）
+    をこのファイルだけで確認できるようにするための診断ログ。
+    history/ ディレクトリは既に別用途（推薦履歴）で存在している可能性があるため
+    os.makedirs(exist_ok=True) で安全に作成する。
+    """
+    try:
+        os.makedirs("history", exist_ok=True)
+
+        attempts = _RUN_STATS.get("theme_collect_attempts")
+        collect_total = _RUN_STATS.get("theme_collect_total")
+        rate = _RUN_STATS.get("fin_success_rate")
+        fin_n = _RUN_STATS.get("fin_success_n")
+        fin_total = _RUN_STATS.get("fin_total")
+
+        lines = [
+            f"実行日時(JST): {now_jst():%Y-%m-%d %H:%M}",
+            f"モード: {'週間サマリー' if is_weekly else '日次'}",
+        ]
+        if attempts is not None:
+            lines.append(f"株探テーマ収集: {collect_total}社（{attempts}回目で確定）")
+        else:
+            lines.append("株探テーマ収集: 記録なし（収集処理まで到達せず）")
+        if rate is not None:
+            lines.append(f"財務データ取得成功率: {rate:.0f}% ({fin_n}/{fin_total}社)")
+        else:
+            lines.append("財務データ取得成功率: 記録なし（取得処理まで到達せず）")
+        lines.append(f"送信銘柄数: {len(rows) if rows is not None else 0}")
+        lines.append(f"💎仕込み候補数: {len(shikomi_list) if shikomi_list is not None else 0}")
+        lines.append(f"エラー: {'なし' if error is None else f'{type(error).__name__}: {error}'}")
+
+        with open("history/last_run_debug.txt", "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        print("🩺 実行ログを history/last_run_debug.txt に保存しました。")
+    except Exception as log_err:
+        # 診断ログの保存失敗でメール送信自体を止めたくないので握りつぶす
+        print(f"実行ログの保存に失敗しました: {log_err}")
+
+
 if __name__ == "__main__":
     # 土曜の朝（JST）は週間サマリーモード（次週のおすすめテーマ付き）
     is_weekly = FORCE_WEEKLY or now_jst().weekday() == 5
     print(f"モード: {'週間サマリー' if is_weekly else '日次'}（JST {now_jst():%Y-%m-%d %H:%M}）")
 
     holdings_html, target_hit = "", False
-    hrows = []
+    hrows: list = []
+    rows, shikomi_list = [], []
+    run_error: Exception | None = None
+
     try:
-        hrows = build_holdings_report()
-        print(f"保有銘柄: {len(hrows)} 件")
-        holdings_html = _render_holdings(hrows)
-        target_hit = any(r.get("target_status") in ("hit_buy", "hit_sell") for r in hrows)
+        try:
+            hrows = build_holdings_report()
+            print(f"保有銘柄: {len(hrows)} 件")
+            holdings_html = _render_holdings(hrows)
+            target_hit = any(r.get("target_status") in ("hit_buy", "hit_sell") for r in hrows)
+        except Exception as e:
+            print(f"保有銘柄レポートの構築に失敗しました（テーマレポートは続行します）: {e}")
+
+        rows, themes, ranking, highlight, shikomi_list, weekly_recs = build_todays_report()
+        print(f"送信銘柄: {len(rows)} 件（💎仕込み候補 {len(shikomi_list)} 件）")
+
+        action_html = _render_action_summary(hrows, shikomi_list)
+
+        # 💎仕込み候補を推薦履歴に記録（失敗してもメール送信は続行）
+        try:
+            recorded_n = history.record_recommendations(shikomi_list)
+            print(f"推薦履歴に記録: {recorded_n} 件")
+        except Exception as e:
+            print(f"推薦履歴の記録に失敗しました（メール送信は続行します）: {e}")
+
+        # 📊 月次レビュー（答え合わせ）：毎月1日の朝 or FORCE_REVIEW=1（失敗してもメール送信は続行）
+        show_review = FORCE_REVIEW or now_jst().day == 1
+        review_html = ""
+        if show_review:
+            try:
+                review = build_review_report()
+                review_html = _render_review(review)
+                if review:
+                    print(f"月次レビュー: {review['n']}銘柄 平均{review['avg_change']:+.1f}% "
+                          f"勝率{review['win_rate']:.0f}%（日経平均{'{:+.1f}%'.format(review['benchmark']) if review['benchmark'] is not None else '－'}）")
+                else:
+                    print("月次レビュー: 対象銘柄なし（1ヶ月前の推薦記録がありません）")
+            except Exception as e:
+                print(f"月次レビューの構築に失敗しました（メール送信は続行します）: {e}")
+                review_html = ""
+
+        # 件名：🎯目標到達が最優先、次に📊月次レビュー、次に週間サマリー
+        if is_weekly:
+            subject = f"📈 週間サマリー＆次週の狙い目テーマ {now_jst():%m/%d}"
+        else:
+            subject = f"📈 本日の国策銘柄レポート {now_jst():%m/%d}"
+        if review_html:
+            subject = f"📊 月次レビュー｜{subject}"
+        if target_hit:
+            subject = "🎯目標株価に到達！｜" + subject
+
+        send(render_html(rows, themes, ranking, highlight, shikomi_list,
+                         holdings_html, weekly_recs, is_weekly, action_html, review_html), subject)
     except Exception as e:
-        print(f"保有銘柄レポートの構築に失敗しました（テーマレポートは続行します）: {e}")
-
-    rows, themes, ranking, highlight, shikomi_list, weekly_recs = build_todays_report()
-    print(f"送信銘柄: {len(rows)} 件（💎仕込み候補 {len(shikomi_list)} 件）")
-
-    action_html = _render_action_summary(hrows, shikomi_list)
-
-    # 件名：🎯目標到達が最優先、次に週間サマリー
-    if is_weekly:
-        subject = f"📈 週間サマリー＆次週の狙い目テーマ {now_jst():%m/%d}"
-    else:
-        subject = f"📈 本日の国策銘柄レポート {now_jst():%m/%d}"
-    if target_hit:
-        subject = "🎯目標株価に到達！｜" + subject
-
-    send(render_html(rows, themes, ranking, highlight, shikomi_list,
-                     holdings_html, weekly_recs, is_weekly, action_html), subject)
+        run_error = e
+        print(f"致命的なエラーが発生しました: {e}")
+        raise
+    finally:
+        # 例外で途中終了しても必ず診断ログを残す（次回の原因究明のため）
+        _write_run_debug_log(is_weekly, rows, shikomi_list, error=run_error)

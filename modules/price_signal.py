@@ -1,6 +1,8 @@
 import streamlit as st
 import yfinance as yf
 
+from modules.yf_session import get_yf_session
+
 
 def _rsi(close, period: int = 14):
     delta = close.diff()
@@ -20,7 +22,7 @@ def _buy_timing_uncached(code: str) -> dict | None:
     signal: 'buy' / 'neutral' / 'hot'
     """
     try:
-        hist = yf.Ticker(f"{code}.T").history(period="6mo")
+        hist = yf.Ticker(f"{code}.T", session=get_yf_session()).history(period="6mo")
         if hist is None or len(hist) < 80:
             return None
         close = hist["Close"]
@@ -101,7 +103,7 @@ def _holding_signal_uncached(code: str) -> dict | None:
     action: plunge / take_profit / trend_warning / buy_more / hold
     """
     try:
-        hist = yf.Ticker(f"{code}.T").history(period="6mo")
+        hist = yf.Ticker(f"{code}.T", session=get_yf_session()).history(period="6mo")
         if hist is None or len(hist) < 80:
             return None
         close = hist["Close"]

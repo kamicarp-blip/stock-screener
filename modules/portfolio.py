@@ -13,6 +13,7 @@ from modules.financial_data import _get_financial_data_uncached
 from modules.theme_search import get_kabutan_name
 from modules.price_signal import _holding_signal_uncached
 from modules.yf_retry import with_retry
+from modules.yf_session import get_yf_session
 
 EARNINGS_SOON_DAYS = 14
 
@@ -117,7 +118,7 @@ def analyze_holding(h: dict) -> dict | None:
 
     ticker = None
     try:
-        ticker = yf.Ticker(f"{code}.T")
+        ticker = yf.Ticker(f"{code}.T", session=get_yf_session())
         if price is None:
             info = ticker.info
             price = info.get("currentPrice") or info.get("regularMarketPrice")

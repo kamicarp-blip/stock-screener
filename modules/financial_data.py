@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 
+from modules.yf_session import get_yf_session
+
 
 def _get_financial_data_uncached(code: str) -> dict | None:
     """yfinance で日本株の財務データを取得（コード.T 形式）。
@@ -11,7 +13,7 @@ def _get_financial_data_uncached(code: str) -> dict | None:
     リトライしても実際には再実行されず同じNoneが即返るだけになるため）。
     """
     try:
-        ticker = yf.Ticker(f"{code}.T")
+        ticker = yf.Ticker(f"{code}.T", session=get_yf_session())
         info = ticker.info
         if not info or not info.get("quoteType"):
             return None
