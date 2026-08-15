@@ -5,6 +5,8 @@ import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 
+from modules.yf_session import get_yf_session
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -14,6 +16,23 @@ HEADERS = {
     "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
 }
 MAX_STOCKS_PER_THEME = 40
+
+
+def _get(url: str, **kwargs):
+    """株探へのGET。TLSフィンガープリントをChromeに偽装したセッションを使う。
+
+    素のrequestsだとクラウドIP（GitHub Actions等）からのアクセスが
+    ボット判定でブロックされ、空レスポンス（または0件）になることがある
+    （yfinance側で判明したのと同じ問題）。curl_cffiのセッションが
+    使えない環境では従来通りrequestsにフォールバックする。
+    """
+    session = get_yf_session()
+    kwargs.setdefault("headers", HEADERS)
+    kwargs.setdefault("timeout", 15)
+    if session is not None:
+        return session.get(url, **kwargs)
+    return requests.get(url, **kwargs)
+
 
 # よく使う英語略称・別名 → 株探の正式テーマ名
 SYNONYMS = {
@@ -96,10 +115,7 @@ def _fetch_popular_themes() -> list[str]:
     out = set()
     for period in (1, 2, 3):
         try:
-            r = requests.get(
-                f"https://kabutan.jp/info/accessranking/{period}_2",
-                headers=HEADERS, timeout=15,
-            )
+            r = _get(f"https://kabutan.jp/info/accessranking/{period}_2")
             r.encoding = "utf-8"
             out.update(
                 urllib.parse.unquote(t)
@@ -162,7 +178,7 @@ def _candidates(keyword: str) -> list[str]:
 def get_theme_stocks_by_name(name: str) -> list[dict]:
     """テーマ名から銘柄リスト（コード・銘柄名）を取得"""
     try:
-        r = requests.get(_theme_url(name), headers=HEADERS, timeout=15)
+        r = _get(_theme_url(name))
         if r.status_code != 200:
             return []
         r.encoding = "utf-8"
@@ -219,9 +235,7 @@ def suggest_themes(limit: int = 15) -> list[str]:
 def get_trending_themes(limit: int = 8) -> list[str]:
     """株探アクセスランキング順（人気順）でテーマ名を返す ＝『今注目のテーマ』"""
     try:
-        r = requests.get(
-            "https://kabutan.jp/info/accessranking/3_2", headers=HEADERS, timeout=15
-        )
+        r = _get("https://kabutan.jp/info/accessranking/3_2")
         r.encoding = "utf-8"
         names = [
             urllib.parse.unquote(t)
@@ -256,9 +270,7 @@ def get_all_theme_stocks(limit: int = 150) -> list[dict]:
 def get_kabutan_name(code: str) -> str:
     """株探の銘柄ページから日本語社名を取得"""
     try:
-        r = requests.get(
-            f"https://kabutan.jp/stock/?code={code}", headers=HEADERS, timeout=10
-        )
+        r = _get(f"https://kabutan.jp/stock/?code={code}", timeout=10)
         if r.status_code != 200:
             return code
         r.encoding = "utf-8"
@@ -288,12 +300,7 @@ def search_stocks(query: str) -> list[dict]:
 
     # 株探 /search/ を使用（結果リンクは /search/linkcompany?code=XXXX 形式）
     try:
-        r = requests.get(
-            "https://kabutan.jp/search/",
-            params={"q": query},
-            headers=HEADERS,
-            timeout=15,
-        )
+        r = _get("https://kabutan.jp/search/", params={"q": query})
         if r.status_code != 200:
             return []
         r.encoding = "utf-8"
