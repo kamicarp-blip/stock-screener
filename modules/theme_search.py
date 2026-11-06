@@ -1,3 +1,5 @@
+import json
+import os
 import re
 import difflib
 import urllib.parse
@@ -174,9 +176,45 @@ def _candidates(keyword: str) -> list[str]:
     return out[:10]
 
 
+_THEME_CACHE_PATH = os.path.join("history", "theme_cache.json")
+
+
+def _cache_load() -> dict:
+    try:
+        with open(_THEME_CACHE_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _cache_save(name: str, stocks: list[dict]) -> None:
+    """取得成功したテーマ銘柄をファイルに保存（株探がブロックされた日の代用）"""
+    try:
+        data = _cache_load()
+        if data.get(name) == stocks:
+            return
+        data[name] = stocks
+        os.makedirs("history", exist_ok=True)
+        with open(_THEME_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=0)
+    except Exception:
+        pass
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_theme_stocks_by_name(name: str) -> list[dict]:
-    """テーマ名から銘柄リスト（コード・銘柄名）を取得"""
+    """テーマ名から銘柄リストを取得。ライブ取得に失敗したら前回成功時のキャッシュで代用"""
+    stocks = _fetch_theme_stocks_live(name)
+    if stocks:
+        _cache_save(name, stocks)
+        return stocks
+    cached = _cache_load().get(name) or []
+    if cached:
+        print(f"[株探取得失敗→キャッシュ使用] {name}: {len(cached)}社")
+    return cached
+
+
+def _fetch_theme_stocks_live(name: str) -> list[dict]:
     try:
         r = _get(_theme_url(name))
         if r.status_code != 200:

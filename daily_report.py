@@ -1060,10 +1060,29 @@ def send(html: str, subject: str | None = None):
     msg.attach(MIMEText(html, "html", "utf-8"))
 
     ctx = ssl.create_default_context()
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ctx) as srv:
-        srv.login(addr, pw)
-        srv.sendmail(addr, [a.strip() for a in to.split(",")], msg.as_string())
-    print("メール送信完了:", to)
+    rcpts = [a.strip() for a in to.split(",")]
+    last_err = None
+    # 465(SSL)→587(STARTTLS) の順に、各2回まで試す（接続断対策）
+    for attempt in range(2):
+        for mode, port in (("ssl", 465), ("starttls", 587)):
+            try:
+                if mode == "ssl":
+                    srv = smtplib.SMTP_SSL("smtp.gmail.com", port, context=ctx, timeout=60)
+                else:
+                    srv = smtplib.SMTP("smtp.gmail.com", port, timeout=60)
+                    srv.starttls(context=ctx)
+                with srv:
+                    srv.login(addr, pw)
+                    srv.sendmail(addr, rcpts, msg.as_string())
+                print(f"メール送信完了: {to}（{mode}:{port}）")
+                return
+            except smtplib.SMTPAuthenticationError:
+                raise  # パスワード不正はリトライしても無駄
+            except Exception as e:
+                last_err = e
+                print(f"送信失敗（{mode}:{port}, {attempt + 1}回目）: {type(e).__name__}: {e}")
+                time.sleep(10)
+    raise last_err
 
 
 def _write_run_debug_log(is_weekly: bool, rows: list, shikomi_list: list, error: Exception | None = None) -> None:
